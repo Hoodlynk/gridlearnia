@@ -1,13 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsEmail, IsString, MaxLength, MinLength } from 'class-validator';
 
+// Platform-level login: emails are globally unique.
 export class LoginDto {
-  @ApiProperty({ example: 'acme' })
-  @IsString()
-  @MaxLength(100)
-  tenantSubdomain: string;
-
-  @ApiProperty({ example: 'owner@acme.com' })
+  @ApiProperty({ example: 'jane@example.com' })
   @IsEmail()
   @MaxLength(255)
   email: string;

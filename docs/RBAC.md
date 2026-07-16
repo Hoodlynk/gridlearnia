@@ -28,8 +28,8 @@ School Management System role-based access control design. Each **tenant is a sc
 
 | Role | Purpose |
 |---|---|
-| **ORGANIZATION_ADMIN** | Full `manage` on **every module** within the school — the tenant-level superuser. Only a DIRECTOR can grant or revoke it (an org admin holds `user-management:manage` and could otherwise mint more org admins). |
-| **DIRECTOR** (Owner) | School proprietor. Full control incl. school settings, finance visibility, user management. Maps to today's `OWNER`. |
+| **ORGANIZATION_ADMIN** | **The tenant root**: full `manage` on every module within the school. Bound to the school creator when a school request is approved (see [ONBOARDING.md](ONBOARDING.md)). Grant/revoke requires an existing ORGANIZATION_ADMIN or platform SUPER_ADMIN; the last holder can never be removed, deactivated, or deleted. |
+| **DIRECTOR** (Owner) | School proprietor. Full control of academics + settings, view-only on money movement. A normal assignable role — the root protections live on ORGANIZATION_ADMIN. |
 | **PRINCIPAL** | Head of school. Full academic + operational control; view-only on settings and money movement. |
 | **DEPUTY_PRINCIPAL** | Academic operations: admissions, student records, communication. View-only elsewhere. |
 
@@ -180,7 +180,7 @@ updateExam(...) {}
 - **`PermissionsGuard`** (`src/rbac/guards/permissions.guard.ts`): reads `@RequirePermissions()` metadata (all listed permissions required), resolves the user's roles → flattened permission set via `RbacService`, and checks each. `module:manage` satisfies any action on that module. Routes without the decorator only require authentication; `@Public()` routes skip auth entirely.
 - **`RbacService`** (`src/rbac/rbac.service.ts`): resolution is cached in-process for **60s per user** and invalidated immediately on role assign/remove. *TODO: move the cache to Redis when scaling past one instance so revocation propagates across dynos within the TTL.*
 - **JWT stays slim**: the token carries `sub` + `tenantId` + `email` only — no roles or permissions — so role changes take effect on the next request, not at token expiry. `GET /auth/me` returns the resolved `roles` and `permissions` arrays for the frontend to drive menus/buttons.
-- **Registration**: `POST /auth/register` creates the school and assigns the first user DIRECTOR (requires system roles to be seeded).
+- **Registration & onboarding**: `POST /auth/register` creates a platform-level user (no school, zero roles ⇒ zero access). Schools and role grants come from the onboarding flow — see [ONBOARDING.md](ONBOARDING.md).
 - **Scope enforcement lives in services** (with §6): every service method adds the resolved scope (e.g. allowed `classIds`) to the Prisma `where` — same pattern as `tenantId` today.
 - ☐ **Audit** (not yet built): every `approve`, `delete`, and `export` on Finance/Student Records should write to `audit_logs` (table already exists).
 
@@ -197,10 +197,9 @@ Guard rails, strictest first:
 
 | Role | Rule |
 |---|---|
-| SUPER_ADMIN | Never assignable through the tenant API; hidden from `GET /roles`. |
-| DIRECTOR | Cannot be removed from a user; DIRECTOR accounts cannot be deactivated or deleted. |
-| ORGANIZATION_ADMIN | Grant **and** revoke require the acting user to hold DIRECTOR (checked uncached, so a just-revoked director can't ride the permission cache). Prevents org admins minting or stripping other org admins. |
-| everything else | Anyone with `user-management:manage`. |
+| SUPER_ADMIN | Never assignable through the tenant API; hidden from `GET /roles`. Bootstrapped via seed (`SEED_SUPERADMIN_EMAIL/PASSWORD`). |
+| ORGANIZATION_ADMIN | The tenant root. Grant **and** revoke require an existing ORGANIZATION_ADMIN or SUPER_ADMIN (checked uncached, so a just-revoked admin can't ride the permission cache). The **last** org admin of a school cannot be removed, deactivated, or deleted. Never grantable via invitation. |
+| everything else | Anyone with `user-management:manage`; also grantable via invitations. |
 
 Seeding: `npm run prisma:seed` — idempotent; in production it seeds only roles/permissions (no demo school). Run once per environment after migrations.
 

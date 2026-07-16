@@ -1,0 +1,32 @@
+# Local development database — eliminates the ~330ms-per-query latency of
+# talking to Supabase (eu-west-1) from your machine.
+#
+# Usage:
+#   docker compose up -d
+#   # point .env at it:
+#   #   DATABASE_URL=postgresql://gridlearnia:gridlearnia@localhost:54329/gridlearnia
+#   #   DIRECT_URL=postgresql://gridlearnia:gridlearnia@localhost:54329/gridlearnia
+#   npm run prisma:migrate   # creates tables
+#   npm run prisma:seed      # roles, permissions, demo school, super admin
+#
+# Supabase remains the database for staging/production.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gridlearnia-db
+    ports:
+      - '54329:5432'
+    environment:
+      POSTGRES_USER: gridlearnia
+      POSTGRES_PASSWORD: gridlearnia
+      POSTGRES_DB: gridlearnia
+    volumes:
+      - gridlearnia_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U gridlearnia']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  gridlearnia_pgdata:

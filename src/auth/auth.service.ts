@@ -10,7 +10,6 @@ import { Tenant, TenantStatus, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { JwtPayload } from '../common/types';
 import { PrismaService } from '../prisma/prisma.service';
-import { TENANT_ROOT_ROLE } from '../rbac/rbac.constants';
 import { RbacService } from '../rbac/rbac.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -33,7 +32,7 @@ export interface AuthResponse {
     id: string;
     name: string;
     subdomain: string;
-  };
+  } | null;
 }
 
 @Injectable()
@@ -47,76 +46,42 @@ export class AuthService {
     private readonly rbacService: RbacService,
   ) {}
 
+  /**
+   * Platform-level registration: creates a user with no school and no roles
+   * (⇒ empty permission set). Users get a school by requesting one
+   * (SUPER_ADMIN approval) or accepting an invitation.
+   */
   async register(dto: RegisterDto): Promise<AuthResponse> {
-    const existingTenant = await this.prisma.tenant.findUnique({
-      where: { subdomain: dto.tenantSubdomain },
+    const existing = await this.prisma.user.findUnique({
+      where: { email: dto.email },
     });
-    if (existingTenant) {
-      throw new ConflictException('Tenant subdomain already exists');
-    }
-
-    // The DIRECTOR system role must exist (seeded) before schools can register.
-    const directorRole = await this.prisma.role.findFirst({
-      where: { key: TENANT_ROOT_ROLE, tenantId: null },
-    });
-    if (!directorRole) {
-      throw new ConflictException(
-        'System roles are not seeded — run `npm run prisma:seed` first',
-      );
+    if (existing) {
+      throw new ConflictException('Email already registered');
     }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
 
-    const { tenant, user } = await this.prisma.$transaction(async (tx) => {
-      const newTenant = await tx.tenant.create({
-        data: {
-          name: dto.tenantName,
-          subdomain: dto.tenantSubdomain,
-        },
-      });
-
-      const newUser = await tx.user.create({
-        data: {
-          tenantId: newTenant.id,
-          email: dto.email,
-          passwordHash,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-        },
-      });
-
-      await tx.userRole.create({
-        data: { userId: newUser.id, roleId: directorRole.id },
-      });
-
-      return { tenant: newTenant, user: newUser };
+    const user = await this.prisma.user.create({
+      data: {
+        email: dto.email,
+        passwordHash,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+      },
     });
 
-    this.logger.log(`New school registered: ${tenant.subdomain}`);
+    this.logger.log(`New platform user registered: ${user.email}`);
 
-    return this.buildAuthResponse(user, tenant);
+    return this.buildAuthResponse(user, null);
   }
 
-  async login(dto: LoginDto): Promise<AuthResponse> {
-    const tenant = await this.prisma.tenant.findFirst({
-      where: { subdomain: dto.tenantSubdomain, deletedAt: null },
-    });
-    if (!tenant) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-
-    if (
-      tenant.status === TenantStatus.SUSPENDED ||
-      tenant.status === TenantStatus.CANCELLED
-    ) {
-      throw new UnauthorizedException('Tenant account is not active');
-    }
-
+  async login(dto: LoginDto, ip?: string): Promise<AuthResponse> {
     const user = await this.prisma.user.findFirst({
-      where: { tenantId: tenant.id, email: dto.email, deletedAt: null },
+      where: { email: dto.email, deletedAt: null },
+      include: { tenant: true },
     });
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Invalid email or password');
     }
 
     if (user.lockedUntil && user.lockedUntil > new Date()) {
@@ -140,25 +105,45 @@ export class AuthService {
               : null,
         },
       });
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Invalid email or password');
     }
 
     if (!user.isActive) {
       throw new UnauthorizedException('Account is inactive');
     }
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        failedLoginAttempts: 0,
-        lockedUntil: null,
-        lastLoginAt: new Date(),
-      },
-    });
+    if (
+      user.tenant &&
+      (user.tenant.deletedAt ||
+        user.tenant.status === TenantStatus.SUSPENDED ||
+        user.tenant.status === TenantStatus.CANCELLED)
+    ) {
+      throw new UnauthorizedException('Tenant account is not active');
+    }
 
-    this.logger.log(`User logged in: ${user.email} (${tenant.subdomain})`);
+    // Bookkeeping — doesn't gate the login, so don't make the user wait on it
+    void this.prisma.user
+      .update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: new Date(),
+          lastLoginIp: ip ?? null,
+        },
+      })
+      .catch((error) =>
+        this.logger.error(
+          `Failed to record login bookkeeping for ${user.email}`,
+          error instanceof Error ? error.stack : String(error),
+        ),
+      );
 
-    return this.buildAuthResponse(user, tenant);
+    this.logger.log(
+      `User logged in: ${user.email}${user.tenant ? ` (${user.tenant.subdomain})` : ' (platform)'} ip=${ip ?? 'unknown'}`,
+    );
+
+    return this.buildAuthResponse(user, user.tenant);
   }
 
   async refreshToken(refreshToken: string): Promise<AuthResponse> {
@@ -175,7 +160,7 @@ export class AuthService {
       where: { id: payload.sub, deletedAt: null, isActive: true },
       include: { tenant: true },
     });
-    if (!user || user.tenant.deletedAt) {
+    if (!user || (user.tenant && user.tenant.deletedAt)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -184,13 +169,13 @@ export class AuthService {
 
   private async buildAuthResponse(
     user: User,
-    tenant: Tenant,
+    tenant: Tenant | null,
   ): Promise<AuthResponse> {
     // Slim token: permissions are resolved server-side per request, so role
     // changes/revocations take effect without waiting for token expiry.
     const payload: JwtPayload = {
       sub: user.id,
-      tenantId: tenant.id,
+      tenantId: tenant?.id ?? null,
       email: user.email,
     };
 
@@ -223,11 +208,9 @@ export class AuthService {
         lastName: user.lastName,
         roles: access.roles,
       },
-      tenant: {
-        id: tenant.id,
-        name: tenant.name,
-        subdomain: tenant.subdomain,
-      },
+      tenant: tenant
+        ? { id: tenant.id, name: tenant.name, subdomain: tenant.subdomain }
+        : null,
     };
   }
 }

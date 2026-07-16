@@ -2,12 +2,14 @@ import { Body, Controller, Get, Patch } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Tenant } from '@prisma/client';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
+import { RequireTenant } from '../common/decorators/require-tenant.decorator';
 import { RequirePermissions } from '../rbac/decorators/require-permissions.decorator';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
 import { TenantsService } from './tenants.service';
 
 @ApiTags('tenants')
 @ApiBearerAuth()
+@RequireTenant()
 @Controller('tenants')
 export class TenantsController {
   constructor(private readonly tenantsService: TenantsService) {}

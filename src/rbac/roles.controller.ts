@@ -2,11 +2,13 @@ import { Controller, Get } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Tenant } from '@prisma/client';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
+import { RequireTenant } from '../common/decorators/require-tenant.decorator';
 import { RequirePermissions } from './decorators/require-permissions.decorator';
 import { RbacService } from './rbac.service';
 
 @ApiTags('rbac')
 @ApiBearerAuth()
+@RequireTenant()
 @Controller('roles')
 export class RolesController {
   constructor(private readonly rbacService: RbacService) {}

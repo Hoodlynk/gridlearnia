@@ -1,7 +1,16 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Tenant } from '@prisma/client';
 import { Throttle } from '@nestjs/throttler';
+import { FastifyRequest } from 'fastify';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -22,7 +31,10 @@ export class AuthController {
 
   @Public()
   @Post('register')
-  @ApiOperation({ summary: 'Register a new tenant with an owner account' })
+  @ApiOperation({
+    summary:
+      'Platform registration (no school). Join a school via invitation, or request one.',
+  })
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
@@ -32,9 +44,10 @@ export class AuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with tenant subdomain + credentials' })
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  @ApiOperation({ summary: 'Login with email + password' })
+  login(@Body() dto: LoginDto, @Req() request: FastifyRequest) {
+    // request.ip resolves X-Forwarded-For (trustProxy) → real client IP
+    return this.authService.login(dto, request.ip);
   }
 
   @Public()
@@ -49,7 +62,10 @@ export class AuthController {
   @Get('me')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get the authenticated user, tenant, roles, and permissions' })
-  async me(@CurrentUser() user: SafeUser, @CurrentTenant() tenant: Tenant) {
+  async me(
+    @CurrentUser() user: SafeUser,
+    @CurrentTenant() tenant: Tenant | null,
+  ) {
     const access = await this.rbacService.getAccess(user.id);
     return {
       id: user.id,
@@ -58,11 +74,9 @@ export class AuthController {
       lastName: user.lastName,
       roles: access.roles,
       permissions: [...access.permissions].sort(),
-      tenant: {
-        id: tenant.id,
-        name: tenant.name,
-        subdomain: tenant.subdomain,
-      },
+      tenant: tenant
+        ? { id: tenant.id, name: tenant.name, subdomain: tenant.subdomain }
+        : null,
     };
   }
 }

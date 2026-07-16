@@ -321,6 +321,52 @@ async function seedRbac() {
   }
 }
 
+async function assignSystemRole(userId: string, key: string) {
+  const role = await prisma.role.findFirst({ where: { key, tenantId: null } });
+  if (!role) throw new Error(`System role ${key} not seeded`);
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId, roleId: role.id } },
+    update: {},
+    create: { userId, roleId: role.id },
+  });
+}
+
+/**
+ * Bootstrap the platform SUPER_ADMIN (a tenantless user). In production,
+ * requires SEED_SUPERADMIN_EMAIL + SEED_SUPERADMIN_PASSWORD env vars; in
+ * development, falls back to superadmin@gridlearnia.dev / password123.
+ */
+async function seedSuperAdmin() {
+  const isProd = process.env.NODE_ENV === 'production';
+  const email =
+    process.env.SEED_SUPERADMIN_EMAIL ??
+    (isProd ? undefined : 'superadmin@gridlearnia.dev');
+  const password =
+    process.env.SEED_SUPERADMIN_PASSWORD ?? (isProd ? undefined : 'password123');
+
+  if (!email || !password) {
+    console.log(
+      '⏭️  Skipping SUPER_ADMIN bootstrap (set SEED_SUPERADMIN_EMAIL/PASSWORD)',
+    );
+    return;
+  }
+
+  const user = await prisma.user.upsert({
+    where: { email },
+    update: {},
+    create: {
+      email,
+      passwordHash: await bcrypt.hash(password, 10),
+      firstName: 'Platform',
+      lastName: 'Admin',
+      isActive: true,
+      emailVerified: true,
+    },
+  });
+  await assignSystemRole(user.id, 'SUPER_ADMIN');
+  console.log(`👑 SUPER_ADMIN: ${email}`);
+}
+
 async function seedDemoSchool() {
   console.log('🏫 Seeding demo school...');
 
@@ -341,6 +387,11 @@ async function seedDemoSchool() {
   const passwordHash = await bcrypt.hash('password123', 10);
 
   const demoUsers: { email: string; firstName: string; roles: string[] }[] = [
+    {
+      email: 'orgadmin@demo.com',
+      firstName: 'Olive',
+      roles: ['ORGANIZATION_ADMIN'],
+    },
     { email: 'director@demo.com', firstName: 'Dan', roles: ['DIRECTOR'] },
     { email: 'principal@demo.com', firstName: 'Pat', roles: ['PRINCIPAL'] },
     { email: 'bursar@demo.com', firstName: 'Bea', roles: ['BURSAR'] },
@@ -355,7 +406,7 @@ async function seedDemoSchool() {
 
   for (const { email, firstName, roles } of demoUsers) {
     const user = await prisma.user.upsert({
-      where: { tenantId_email: { tenantId: tenant.id, email } },
+      where: { email },
       update: {},
       create: {
         tenantId: tenant.id,
@@ -369,15 +420,7 @@ async function seedDemoSchool() {
     });
 
     for (const key of roles) {
-      const role = await prisma.role.findFirst({
-        where: { key, tenantId: null },
-      });
-      if (!role) throw new Error(`System role ${key} not seeded`);
-      await prisma.userRole.upsert({
-        where: { userId_roleId: { userId: user.id, roleId: role.id } },
-        update: {},
-        create: { userId: user.id, roleId: role.id },
-      });
+      await assignSystemRole(user.id, key);
     }
     console.log(`   ${email} → ${roles.join(' + ')}`);
   }
@@ -386,12 +429,14 @@ async function seedDemoSchool() {
 async function main() {
   console.log('🌱 Starting seed...');
   await seedRbac();
+  await seedSuperAdmin();
 
   if (process.env.NODE_ENV !== 'production') {
     await seedDemoSchool();
-    console.log('\n🔑 Demo logins (tenant "demo", password "password123"):');
-    console.log('   director@demo.com, principal@demo.com, bursar@demo.com,');
-    console.log('   teacher@demo.com, parent@demo.com, student@demo.com');
+    console.log('\n🔑 Demo logins (password "password123"):');
+    console.log('   superadmin@gridlearnia.dev (platform)');
+    console.log('   orgadmin@demo.com, director@demo.com, principal@demo.com,');
+    console.log('   bursar@demo.com, teacher@demo.com, parent@demo.com, student@demo.com');
   }
 
   console.log('✅ Seed completed');

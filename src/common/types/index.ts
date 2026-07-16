@@ -3,7 +3,7 @@ import { FastifyRequest } from 'fastify';
 
 export interface JwtPayload {
   sub: string; // user id
-  tenantId: string;
+  tenantId: string | null;
   email: string;
 }
 
@@ -11,5 +11,7 @@ export type SafeUser = Omit<User, 'passwordHash'>;
 
 export interface AuthenticatedRequest extends FastifyRequest {
   user: SafeUser;
-  tenant: Tenant;
+  // null for platform-level users who have not joined/created a school yet.
+  // Routes marked @RequireTenant() are guaranteed a non-null tenant.
+  tenant: Tenant | null;
 }

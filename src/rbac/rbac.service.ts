@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   ROLE_KEYS,
@@ -29,7 +30,10 @@ export class RbacService {
   // so role revocation propagates across dynos within the TTL.
   private readonly cache = new Map<string, CacheEntry>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   /** Resolve a user's role keys + flattened permission set (cached ~60s). */
   async getAccess(userId: string): Promise<UserAccess> {
@@ -120,8 +124,37 @@ export class RbacService {
       create: { userId, roleId: role.id },
     });
 
+    void this.auditService.record({
+      action: 'ROLE_ASSIGNED',
+      tenantId,
+      actorId,
+      resourceType: 'user',
+      resourceId: userId,
+      metadata: { roleKey, targetEmail: user.email },
+      summary: `${roleKey} assigned to ${user.email}`,
+      // The tenant root grants full control of a school — always alert.
+      critical: roleKey === TENANT_ROOT_ROLE,
+    });
+
     this.invalidate(userId);
     return { roles: (await this.getAccess(userId)).roles };
+  }
+
+  /** Would removing/deactivating this user leave the school without a root? */
+  async isLastOrgAdmin(tenantId: string, userId: string): Promise<boolean> {
+    const holdsRoot = await this.prisma.userRole.count({
+      where: { userId, role: { key: TENANT_ROOT_ROLE } },
+    });
+    if (holdsRoot === 0) {
+      return false;
+    }
+    const totalRoots = await this.prisma.userRole.count({
+      where: {
+        role: { key: TENANT_ROOT_ROLE },
+        user: { tenantId, deletedAt: null, isActive: true },
+      },
+    });
+    return totalRoots <= 1;
   }
 
   async removeRole(
@@ -130,13 +163,16 @@ export class RbacService {
     userId: string,
     roleKey: string,
   ): Promise<{ roles: string[] }> {
-    if (roleKey === TENANT_ROOT_ROLE) {
+    await this.assertActorCanAdministerRole(actorId, roleKey);
+
+    if (
+      roleKey === TENANT_ROOT_ROLE &&
+      (await this.isLastOrgAdmin(tenantId, userId))
+    ) {
       throw new ForbiddenException(
-        `The ${TENANT_ROOT_ROLE} role cannot be removed`,
+        `Cannot remove the last ${TENANT_ROOT_ROLE} of the school`,
       );
     }
-
-    await this.assertActorCanAdministerRole(actorId, roleKey);
 
     const user = await this.prisma.user.findFirst({
       where: { id: userId, tenantId, deletedAt: null },
@@ -155,14 +191,25 @@ export class RbacService {
       );
     }
 
+    void this.auditService.record({
+      action: 'ROLE_REMOVED',
+      tenantId,
+      actorId,
+      resourceType: 'user',
+      resourceId: userId,
+      metadata: { roleKey, targetEmail: user.email },
+      summary: `${roleKey} removed from ${user.email}`,
+      critical: roleKey === TENANT_ROOT_ROLE,
+    });
+
     this.invalidate(userId);
     return { roles: (await this.getAccess(userId)).roles };
   }
 
   /**
-   * ORGANIZATION_ADMIN holds user-management:manage itself, so without this
-   * check an org admin could mint more org admins. Granting/revoking it is
-   * therefore reserved for the DIRECTOR (tenant root).
+   * ORGANIZATION_ADMIN is the tenant root. Granting/revoking it requires the
+   * actor to already hold it (or be platform SUPER_ADMIN) — checked uncached
+   * so a just-revoked admin can't ride the permission cache.
    */
   private async assertActorCanAdministerRole(
     actorId: string,
@@ -171,10 +218,13 @@ export class RbacService {
     if (roleKey !== ROLE_KEYS.ORGANIZATION_ADMIN) {
       return;
     }
-    const actorIsDirector = await this.holdsRole(actorId, TENANT_ROOT_ROLE);
-    if (!actorIsDirector) {
+    const [isOrgAdmin, isSuperAdmin] = await Promise.all([
+      this.holdsRole(actorId, ROLE_KEYS.ORGANIZATION_ADMIN),
+      this.holdsRole(actorId, ROLE_KEYS.SUPER_ADMIN),
+    ]);
+    if (!isOrgAdmin && !isSuperAdmin) {
       throw new ForbiddenException(
-        `Only a ${TENANT_ROOT_ROLE} can grant or revoke ${ROLE_KEYS.ORGANIZATION_ADMIN}`,
+        `Only an ${ROLE_KEYS.ORGANIZATION_ADMIN} or platform administrator can grant or revoke ${ROLE_KEYS.ORGANIZATION_ADMIN}`,
       );
     }
   }

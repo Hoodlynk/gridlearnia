@@ -60,5 +60,16 @@ export const ROLE_KEYS = {
 /** Roles that can never be assigned through the tenant-facing API. */
 export const UNASSIGNABLE_ROLE_KEYS: string[] = [ROLE_KEYS.SUPER_ADMIN];
 
-/** The tenant-root role: cannot be removed, its holders cannot be deactivated/deleted. */
-export const TENANT_ROOT_ROLE = ROLE_KEYS.DIRECTOR;
+/**
+ * The tenant-root role, bound to the school creator on approval.
+ * A school must always keep at least one holder: the last one cannot be
+ * removed, deactivated, or deleted. Granting/revoking it requires an
+ * existing ORGANIZATION_ADMIN of the school (or platform SUPER_ADMIN).
+ */
+export const TENANT_ROOT_ROLE = ROLE_KEYS.ORGANIZATION_ADMIN;
+
+/** Roles that cannot be handed out via invitations. */
+export const UNINVITABLE_ROLE_KEYS: string[] = [
+  ROLE_KEYS.SUPER_ADMIN,
+  ROLE_KEYS.ORGANIZATION_ADMIN,
+];

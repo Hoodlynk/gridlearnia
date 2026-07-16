@@ -13,6 +13,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Tenant } from '@prisma/client';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { RequireTenant } from '../common/decorators/require-tenant.decorator';
 import { SafeUser } from '../common/types';
 import { RequirePermissions } from '../rbac/decorators/require-permissions.decorator';
 import { RbacService } from '../rbac/rbac.service';
@@ -23,6 +24,7 @@ import { UsersService } from './users.service';
 
 @ApiTags('users')
 @ApiBearerAuth()
+@RequireTenant()
 @Controller('users')
 export class UsersController {
   constructor(

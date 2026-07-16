@@ -41,9 +41,10 @@ model Tenant {
   deletedAt DateTime?
   
   // Relations
-  users     User[]
-  projects  Project[]
-  
+  users       User[]
+  projects    Project[]
+  invitations Invitation[]
+
   @@index([subdomain])
   @@index([status])
   @@index([tier])
@@ -67,11 +68,12 @@ enum TenantStatus {
 // USERS TABLE
 // ============================================
 model User {
-  id       String @id @default(uuid()) @db.Uuid
-  tenantId String @db.Uuid
-  
-  // Credentials
-  email        String @db.VarChar(255)
+  id       String  @id @default(uuid()) @db.Uuid
+  // null = platform-level user (registered, not yet in a school)
+  tenantId String? @db.Uuid
+
+  // Credentials — email is globally unique: login is platform-level (email + password)
+  email        String @unique @db.VarChar(255)
   passwordHash String @db.VarChar(255)
 
   // Profile
@@ -97,15 +99,77 @@ model User {
   deletedAt DateTime?
   
   // Relations
-  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  projects  Project[]
-  userRoles UserRole[]
+  tenant         Tenant?         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  projects       Project[]
+  userRoles      UserRole[]
+  schoolRequests SchoolRequest[]
 
-  @@unique([tenantId, email])
   @@index([tenantId])
-  @@index([email])
   @@index([tenantId, isActive])
   @@map("users")
+}
+
+// ============================================
+// ONBOARDING: SCHOOL REQUESTS & INVITATIONS
+// ============================================
+
+// A platform user's application to create a school; approved by SUPER_ADMIN.
+// Approval creates the tenant and binds the requester as its ORGANIZATION_ADMIN.
+model SchoolRequest {
+  id        String              @id @default(uuid()) @db.Uuid
+  userId    String              @db.Uuid
+  name      String              @db.VarChar(255)
+  subdomain String              @db.VarChar(100)
+  status    SchoolRequestStatus @default(PENDING)
+
+  reviewedBy String?   @db.Uuid
+  reviewedAt DateTime?
+  reason     String?   @db.Text // rejection reason
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([userId])
+  @@map("school_requests")
+}
+
+enum SchoolRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Invitation to join an existing school with pre-assigned roles.
+// Only the SHA-256 hash of the token is stored; the raw token is shown once.
+model Invitation {
+  id        String           @id @default(uuid()) @db.Uuid
+  tenantId  String           @db.Uuid
+  email     String           @db.VarChar(255)
+  roleKeys  String[]
+  tokenHash String           @unique @db.VarChar(64)
+  status    InvitationStatus @default(PENDING)
+
+  invitedBy  String    @db.Uuid
+  expiresAt  DateTime
+  acceptedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([email])
+  @@map("invitations")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
 }
 
 // ============================================
@@ -211,7 +275,8 @@ model Project {
 // ============================================
 model AuditLog {
   id           BigInt   @id @default(autoincrement())
-  tenantId     String   @db.Uuid
+  // null = platform-level event (e.g. SUPER_ADMIN created)
+  tenantId     String?  @db.Uuid
   userId       String?  @db.Uuid
   
   action       String   @db.VarChar(100)

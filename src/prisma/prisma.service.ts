@@ -38,6 +38,16 @@ export class PrismaService
       );
       throw error;
     }
+
+    // Pre-open pool connections in the background: establishing a connection
+    // to a remote DB costs seconds (TLS + auth), and Prisma grows the pool
+    // lazily — without this, random requests pay that setup cost mid-session.
+    void Promise.all(
+      Array.from({ length: 4 }, () => this.$queryRaw`SELECT 1`),
+    ).then(
+      () => this.logger.log('🔥 Connection pool warmed'),
+      () => undefined,
+    );
   }
 
   /** Hostname only — never log the full URL, it contains the password. */

@@ -52,7 +52,9 @@ export class UsersService {
         : {}),
     };
 
-    const [users, total] = await this.prisma.$transaction([
+    // Promise.all, not $transaction: two independent reads don't need
+    // BEGIN/COMMIT round-trips (expensive against a remote DB).
+    const [users, total] = await Promise.all([
       this.prisma.user.findMany({
         where,
         select: userSelect,
@@ -88,9 +90,12 @@ export class UsersService {
   async update(tenantId: string, id: string, dto: UpdateUserDto) {
     const user = await this.findOne(tenantId, id);
 
-    if (dto.isActive === false && user.roles.includes(TENANT_ROOT_ROLE)) {
+    if (
+      dto.isActive === false &&
+      (await this.rbacService.isLastOrgAdmin(tenantId, id))
+    ) {
       throw new ForbiddenException(
-        `A ${TENANT_ROOT_ROLE} account cannot be deactivated`,
+        `The last ${TENANT_ROOT_ROLE} of the school cannot be deactivated`,
       );
     }
 
@@ -105,9 +110,9 @@ export class UsersService {
   async remove(tenantId: string, id: string) {
     const user = await this.findOne(tenantId, id);
 
-    if (user.roles.includes(TENANT_ROOT_ROLE)) {
+    if (await this.rbacService.isLastOrgAdmin(tenantId, id)) {
       throw new ForbiddenException(
-        `A ${TENANT_ROOT_ROLE} account cannot be removed`,
+        `The last ${TENANT_ROOT_ROLE} of the school cannot be removed`,
       );
     }
 

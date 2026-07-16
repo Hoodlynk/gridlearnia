@@ -63,10 +63,11 @@ npm run prisma:migrate
 npm run prisma:seed
 ```
 
-This creates a demo tenant with test users:
-- Email: `owner@demo.com`
-- Password: `password123`
-- Tenant: `demo`
+This seeds the RBAC system data (roles, permissions, access matrix), the platform
+super admin (`superadmin@gridlearnia.dev` in dev, or `SEED_SUPERADMIN_EMAIL/PASSWORD`),
+and — outside production — a demo school. All demo passwords are `password123`:
+`orgadmin@demo.com`, `director@demo.com`, `principal@demo.com`, `bursar@demo.com`,
+`teacher@demo.com`, `parent@demo.com`, `student@demo.com`.
 
 ### 5. Start the development server
 
@@ -101,10 +102,18 @@ src/
 All routes are prefixed with `/api/v1`.
 
 ### Authentication
-- `POST /api/v1/auth/register` - Register new tenant + owner account (public)
-- `POST /api/v1/auth/login` - Login with tenant subdomain + credentials (public, throttled)
+- `POST /api/v1/auth/register` - Platform registration: email + password, no school (public)
+- `POST /api/v1/auth/login` - Login with email + password (public, throttled)
 - `POST /api/v1/auth/refresh` - Refresh access token (public, throttled)
-- `GET /api/v1/auth/me` - Get current user + tenant
+- `GET /api/v1/auth/me` - Current user, tenant (nullable), roles, permissions
+
+### Onboarding (see docs/ONBOARDING.md)
+- `POST /api/v1/school-requests` - Apply to create a school (tenantless users)
+- `GET /api/v1/school-requests/mine` - My requests
+- `GET/POST /api/v1/platform/school-requests[...]` - SUPER_ADMIN review/approve/reject
+- `POST /api/v1/invitations` - Invite an email with roles (user-management:manage)
+- `GET /api/v1/invitations` / `DELETE /api/v1/invitations/:id` - List / revoke
+- `POST /api/v1/invitations/accept` - Redeem an invite token, join the school
 
 ### Users (tenant-scoped)
 - `GET /api/v1/users` - List users (OWNER/ADMIN/MANAGER)
@@ -123,12 +132,17 @@ All routes are prefixed with `/api/v1`.
 
 Success:
 ```json
-{ "success": true, "data": { }, "meta": { "timestamp": "...", "requestId": "..." } }
+{ "success": true, "data": { } }
 ```
 
 Error:
 ```json
-{ "success": false, "error": { "code": "VALIDATION_ERROR", "message": "...", "details": [] }, "meta": { "timestamp": "...", "requestId": "..." } }
+{ "success": false, "message": "Invalid email or password" }
+```
+
+Validation error:
+```json
+{ "success": false, "message": "Invalid input data", "errors": ["email must be an email"] }
 ```
 
 ## Testing

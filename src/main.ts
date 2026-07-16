@@ -7,13 +7,29 @@ import {
 } from '@nestjs/platform-fastify';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from '@fastify/helmet';
+import { randomUUID } from 'crypto';
+import { IncomingMessage } from 'http';
 import { AppModule } from './app.module';
+
+// Heroku's router already tags every request with a UUID in X-Request-ID —
+// reuse it so our logs correlate with router logs; otherwise mint our own.
+// (Validated so a client can't inject arbitrary text into logs.)
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9+/=_.-]{8,128}$/;
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     // trustProxy is required behind Heroku's router so req.ip is the client IP
-    new FastifyAdapter({ trustProxy: true }),
+    new FastifyAdapter({
+      trustProxy: true,
+      genReqId: (req: IncomingMessage) => {
+        const incoming = req.headers['x-request-id'];
+        return typeof incoming === 'string' &&
+          REQUEST_ID_PATTERN.test(incoming)
+          ? incoming
+          : randomUUID();
+      },
+    }),
   );
 
   const config = app.get(ConfigService);

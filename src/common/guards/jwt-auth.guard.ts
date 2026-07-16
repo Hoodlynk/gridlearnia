@@ -61,16 +61,19 @@ export class JwtAuthGuard implements CanActivate {
 
     const { tenant, passwordHash: _passwordHash, ...safeUser } = user;
 
+    // Platform-level users (no school yet) are allowed through; routes that
+    // need school membership are protected by TenantGuard (@RequireTenant).
     if (
-      tenant.deletedAt ||
-      tenant.status === TenantStatus.SUSPENDED ||
-      tenant.status === TenantStatus.CANCELLED
+      tenant &&
+      (tenant.deletedAt ||
+        tenant.status === TenantStatus.SUSPENDED ||
+        tenant.status === TenantStatus.CANCELLED)
     ) {
       throw new UnauthorizedException('Tenant account is not active');
     }
 
     request.user = safeUser;
-    request.tenant = tenant;
+    request.tenant = tenant ?? null;
 
     return true;
   }

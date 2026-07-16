@@ -8,7 +8,7 @@ export class TenantsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getOverview(tenant: Tenant) {
-    const [userCount, projectCount] = await this.prisma.$transaction([
+    const [userCount, projectCount] = await Promise.all([
       this.prisma.user.count({
         where: { tenantId: tenant.id, deletedAt: null },
       }),

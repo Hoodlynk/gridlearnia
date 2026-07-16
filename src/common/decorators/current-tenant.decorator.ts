@@ -2,9 +2,10 @@ import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 import { Tenant } from '@prisma/client';
 import { AuthenticatedRequest } from '../types';
 
+// On routes guarded by @RequireTenant() the tenant is guaranteed non-null.
 export const CurrentTenant = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): Tenant => {
     const request = ctx.switchToHttp().getRequest<AuthenticatedRequest>();
-    return request.tenant;
+    return request.tenant as Tenant;
   },
 );

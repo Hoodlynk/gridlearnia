@@ -3,30 +3,14 @@ import {
   IsEmail,
   IsOptional,
   IsString,
-  Length,
-  Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
 
+// Platform-level registration: no school involved. Schools are created via
+// school requests (SUPER_ADMIN approval) or joined via invitations.
 export class RegisterDto {
-  @ApiProperty({ example: 'Acme Inc' })
-  @IsString()
-  @Length(2, 255)
-  tenantName: string;
-
-  @ApiProperty({
-    example: 'acme',
-    description: 'Lowercase letters, numbers, and hyphens; 3-63 chars',
-  })
-  @IsString()
-  @Matches(/^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/, {
-    message:
-      'tenantSubdomain must be 3-63 lowercase letters, numbers, or hyphens, and cannot start or end with a hyphen',
-  })
-  tenantSubdomain: string;
-
-  @ApiProperty({ example: 'owner@acme.com' })
+  @ApiProperty({ example: 'jane@example.com' })
   @IsEmail()
   @MaxLength(255)
   email: string;

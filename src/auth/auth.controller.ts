@@ -9,8 +9,11 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Tenant } from '@prisma/client';
-import { Throttle } from '@nestjs/throttler';
 import { FastifyRequest } from 'fastify';
+import {
+  perMinute,
+  RateLimit,
+} from '../rate-limit/decorators/rate-limit.decorator';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -40,8 +43,9 @@ export class AuthController {
   }
 
   @Public()
-  // Tight per-IP limit: login is the bcrypt-heavy, brute-forceable endpoint
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  // Tight per-IP bucket: login is the bcrypt-heavy, brute-forceable endpoint.
+  // Burst of 5, refilling at 5/minute.
+  @RateLimit(perMinute(5))
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login with email + password' })
@@ -51,7 +55,19 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  // Same tight bucket as login — separate route, separate bucket key.
+  @RateLimit(perMinute(5))
+  @Post('admin/login')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Platform admin console login (SUPER_ADMIN accounts only)',
+  })
+  adminLogin(@Body() dto: LoginDto, @Req() request: FastifyRequest) {
+    return this.authService.adminLogin(dto, request.ip);
+  }
+
+  @Public()
+  @RateLimit(perMinute(10))
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Exchange a refresh token for new tokens' })

@@ -8,6 +8,7 @@ import { Role } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  PERMISSION_LOCKED_ROLE_KEYS,
   ROLE_KEYS,
   TENANT_ROOT_ROLE,
   UNASSIGNABLE_ROLE_KEYS,
@@ -80,6 +81,11 @@ export class RbacService {
 
   invalidate(userId: string): void {
     this.cache.delete(userId);
+  }
+
+  /** Drop every cached access set — for changes that affect many users. */
+  invalidateAll(): void {
+    this.cache.clear();
   }
 
   /**
@@ -261,6 +267,110 @@ export class RbacService {
         (rp) => `${rp.permission.module}:${rp.permission.action}`,
       ),
     }));
+  }
+
+  /**
+   * Platform (SUPER_ADMIN) view: every SYSTEM role with its permissions and
+   * platform-wide assignment counts — includes SUPER_ADMIN itself.
+   */
+  async listSystemRoles() {
+    const roles = await this.prisma.role.findMany({
+      where: { tenantId: null },
+      include: {
+        permissions: { include: { permission: true } },
+        _count: { select: { users: true } },
+      },
+      orderBy: { key: 'asc' },
+    });
+
+    return roles.map((role) => ({
+      key: role.key,
+      name: role.name,
+      assignedUsers: role._count.users,
+      permissions: role.permissions
+        .map((rp) => `${rp.permission.module}:${rp.permission.action}`)
+        .sort(),
+    }));
+  }
+
+  /**
+   * Platform (SUPER_ADMIN) edit: replace a SYSTEM role's permission set.
+   * Affects every school that has not shadowed the role with its own clone.
+   */
+  async updateSystemRolePermissions(
+    roleKey: string,
+    permissionKeys: string[],
+    actorId: string,
+    ip?: string,
+  ) {
+    if (PERMISSION_LOCKED_ROLE_KEYS.includes(roleKey)) {
+      throw new ForbiddenException(
+        `Permissions for '${roleKey}' are locked and cannot be edited`,
+      );
+    }
+
+    const role = await this.prisma.role.findFirst({
+      where: { key: roleKey, tenantId: null },
+      include: {
+        permissions: { include: { permission: true } },
+        _count: { select: { users: true } },
+      },
+    });
+    if (!role) {
+      throw new NotFoundException(`System role '${roleKey}' does not exist`);
+    }
+
+    const requested = [...new Set(permissionKeys)];
+    const catalog = await this.prisma.permission.findMany();
+    const idByKey = new Map(
+      catalog.map((p) => [`${p.module}:${p.action}`, p.id]),
+    );
+    const unknown = requested.filter((key) => !idByKey.has(key));
+    if (unknown.length > 0) {
+      throw new BadRequestException(
+        `Unknown permissions: ${unknown.join(', ')}`,
+      );
+    }
+
+    const current = new Set(
+      role.permissions.map(
+        (rp) => `${rp.permission.module}:${rp.permission.action}`,
+      ),
+    );
+    const added = requested.filter((key) => !current.has(key));
+    const removed = [...current].filter((key) => !requested.includes(key));
+
+    await this.prisma.$transaction([
+      this.prisma.rolePermission.deleteMany({ where: { roleId: role.id } }),
+      this.prisma.rolePermission.createMany({
+        data: requested.map((key) => ({
+          roleId: role.id,
+          // Validated above — every requested key resolves to an id.
+          permissionId: idByKey.get(key) as string,
+        })),
+      }),
+    ]);
+
+    // A system role edit touches every holder across all schools.
+    this.invalidateAll();
+
+    void this.auditService.record({
+      action: 'SYSTEM_ROLE_PERMISSIONS_UPDATED',
+      actorId,
+      resourceType: 'role',
+      resourceId: role.id,
+      metadata: { roleKey, added, removed, total: requested.length },
+      ip,
+      summary: `${roleKey} permissions updated platform-wide (+${added.length} / -${removed.length}, now ${requested.length})`,
+      critical: true,
+    });
+
+    return {
+      key: role.key,
+      name: role.name,
+      assignedUsers: role._count.users,
+      permissions: [...requested].sort(),
+    };
   }
 
   /** The platform permission catalog, grouped by module. */

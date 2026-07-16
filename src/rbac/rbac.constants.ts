@@ -68,6 +68,15 @@ export const UNASSIGNABLE_ROLE_KEYS: string[] = [ROLE_KEYS.SUPER_ADMIN];
  */
 export const TENANT_ROOT_ROLE = ROLE_KEYS.ORGANIZATION_ADMIN;
 
+/**
+ * Full-access roles whose permission sets cannot be edited — their power is
+ * definitional (platform root / tenant root), not a configurable grant list.
+ */
+export const PERMISSION_LOCKED_ROLE_KEYS: string[] = [
+  ROLE_KEYS.SUPER_ADMIN,
+  ROLE_KEYS.ORGANIZATION_ADMIN,
+];
+
 /** Roles that cannot be handed out via invitations. */
 export const UNINVITABLE_ROLE_KEYS: string[] = [
   ROLE_KEYS.SUPER_ADMIN,

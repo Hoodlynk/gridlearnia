@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -144,6 +145,23 @@ export class AuthService {
     );
 
     return this.buildAuthResponse(user, user.tenant);
+  }
+
+  /**
+   * Dedicated platform-console login: same credential flow, but the backend
+   * itself refuses non-SUPER_ADMIN accounts — the frontend never has to.
+   */
+  async adminLogin(dto: LoginDto, ip?: string): Promise<AuthResponse> {
+    const response = await this.login(dto, ip);
+    if (!response.user.roles.includes('SUPER_ADMIN')) {
+      this.logger.warn(
+        `Admin console login denied for non-admin account: ${dto.email} ip=${ip ?? 'unknown'}`,
+      );
+      throw new ForbiddenException(
+        'This console is restricted to platform administrators',
+      );
+    }
+    return response;
   }
 
   async refreshToken(refreshToken: string): Promise<AuthResponse> {

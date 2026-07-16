@@ -1,0 +1,230 @@
+// Prisma Schema for Multi-Tenant System
+// Database: Supabase PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Runtime queries go through the Supabase pooler (pgBouncer, port 6543).
+  url      = env("DATABASE_URL")
+  // Migrations need a direct connection (port 5432) — pgBouncer can't run DDL sessions.
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// TENANTS TABLE
+// ============================================
+model Tenant {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(255)
+  subdomain String   @unique @db.VarChar(100)
+  tier      TenantTier @default(STANDARD)
+  status    TenantStatus @default(TRIAL)
+  
+  // Tenant configuration
+  settings  Json     @default("{}")
+  
+  // Resource limits
+  maxUsers         Int @default(10)
+  maxStorageGb     Int @default(5)
+  maxApiCallsPerDay Int @default(10000)
+  
+  // Billing
+  subscriptionStartDate DateTime?
+  subscriptionEndDate   DateTime?
+  
+  // Metadata
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  
+  // Relations
+  users     User[]
+  projects  Project[]
+  
+  @@index([subdomain])
+  @@index([status])
+  @@index([tier])
+  @@map("tenants")
+}
+
+enum TenantTier {
+  STANDARD
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+// ============================================
+// USERS TABLE
+// ============================================
+model User {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  
+  // Credentials
+  email        String @db.VarChar(255)
+  passwordHash String @db.VarChar(255)
+
+  // Profile
+  firstName String? @db.VarChar(100)
+  lastName  String? @db.VarChar(100)
+  phone     String? @db.VarChar(20)
+  avatarUrl String? @db.Text
+
+  // Account status
+  isActive        Boolean   @default(true)
+  emailVerified   Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  
+  // Security
+  lastLoginAt         DateTime?
+  lastLoginIp         String?   @db.Inet
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  
+  // Metadata
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  
+  // Relations
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  projects  Project[]
+  userRoles UserRole[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([email])
+  @@index([tenantId, isActive])
+  @@map("users")
+}
+
+// ============================================
+// RBAC (see docs/RBAC.md)
+// ============================================
+
+model Role {
+  id       String  @id @default(uuid()) @db.Uuid
+  // null = seeded system role shared by all tenants;
+  // set = tenant-owned custom/cloned role (shadows the system role with the same key)
+  tenantId String? @db.Uuid
+  key      String  @db.VarChar(50)
+  name     String  @db.VarChar(100)
+  isSystem Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  // NOTE: Postgres treats NULLs as distinct, so this does not dedupe system
+  // roles — a partial unique index on (key) WHERE tenant_id IS NULL is added
+  // in the migration SQL.
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("roles")
+}
+
+model Permission {
+  id     String @id @default(uuid()) @db.Uuid
+  module String @db.VarChar(50) // e.g. "attendance"
+  action String @db.VarChar(20) // create | view | update | delete | approve | export | print | manage
+
+  roles RolePermission[]
+
+  @@unique([module, action])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @db.Uuid
+  roleId String @db.Uuid
+
+  // Optional scope anchors (FKs added when Class/Department tables exist)
+  classId      String? @db.Uuid
+  departmentId String? @db.Uuid
+
+  assignedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([userId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+// ============================================
+// PROJECTS TABLE (Example tenant resource)
+// ============================================
+model Project {
+  id          String  @id @default(uuid()) @db.Uuid
+  tenantId    String  @db.Uuid
+  ownerId     String  @db.Uuid
+  
+  name        String  @db.VarChar(255)
+  description String? @db.Text
+  status      String  @default("active") @db.VarChar(50)
+  
+  // Project metadata
+  metadata    Json    @default("{}")
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  
+  // Relations
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner  User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  @@index([tenantId])
+  @@index([ownerId])
+  @@index([tenantId, status])
+  @@map("projects")
+}
+
+// ============================================
+// AUDIT LOGS TABLE
+// ============================================
+model AuditLog {
+  id           BigInt   @id @default(autoincrement())
+  tenantId     String   @db.Uuid
+  userId       String?  @db.Uuid
+  
+  action       String   @db.VarChar(100)
+  resourceType String?  @db.VarChar(100)
+  resourceId   String?  @db.Uuid
+  
+  metadata     Json?
+  ipAddress    String?  @db.Inet
+  userAgent    String?  @db.Text
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([userId])
+  @@map("audit_logs")
+}

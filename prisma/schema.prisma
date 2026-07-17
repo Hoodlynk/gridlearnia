@@ -99,14 +99,31 @@ model User {
   deletedAt DateTime?
   
   // Relations
-  tenant         Tenant?         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  projects       Project[]
-  userRoles      UserRole[]
-  schoolRequests SchoolRequest[]
+  tenant                  Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  projects                Project[]
+  userRoles               UserRole[]
+  schoolRequests          SchoolRequest[]
+  emailVerificationTokens EmailVerificationToken[]
 
   @@index([tenantId])
   @@index([tenantId, isActive])
   @@map("users")
+}
+
+// Single-use email verification link. Only the SHA-256 hash of the token is
+// stored — the raw token exists only inside the emailed link.
+model EmailVerificationToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.VarChar(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
 }
 
 // ============================================
@@ -122,6 +139,11 @@ model SchoolRequest {
   subdomain String              @db.VarChar(100)
   status    SchoolRequestStatus @default(PENDING)
 
+  // Applicant KYC — nullable only for requests created before this was collected
+  applicantFullName String? @db.VarChar(255)
+  idNumber          String? @db.VarChar(50)
+  phone             String? @db.VarChar(30)
+
   reviewedBy String?   @db.Uuid
   reviewedAt DateTime?
   reason     String?   @db.Text // rejection reason
@@ -129,7 +151,8 @@ model SchoolRequest {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents SchoolRequestDocument[]
 
   @@index([status])
   @@index([userId])
@@ -140,6 +163,31 @@ enum SchoolRequestStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+// KYC file attached to a school request. Only the storage key is kept —
+// files live in DO Spaces (private bucket); reviewers get short-lived
+// signed download URLs.
+model SchoolRequestDocument {
+  id              String                    @id @default(uuid()) @db.Uuid
+  schoolRequestId String                    @db.Uuid
+  type            SchoolRequestDocumentType
+  fileKey         String                    @db.VarChar(512)
+  fileName        String                    @db.VarChar(255)
+  mimeType        String                    @db.VarChar(100)
+  sizeBytes       Int
+
+  createdAt DateTime @default(now())
+
+  schoolRequest SchoolRequest @relation(fields: [schoolRequestId], references: [id], onDelete: Cascade)
+
+  @@index([schoolRequestId])
+  @@map("school_request_documents")
+}
+
+enum SchoolRequestDocumentType {
+  ID_DOCUMENT
+  SCHOOL_CERTIFICATE
 }
 
 // Invitation to join an existing school with pre-assigned roles.

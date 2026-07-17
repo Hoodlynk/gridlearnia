@@ -14,6 +14,7 @@ import { Tenant } from '@prisma/client';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { RequireTenant } from '../common/decorators/require-tenant.decorator';
+import { RequireVerifiedEmail } from '../common/decorators/require-verified-email.decorator';
 import { SafeUser } from '../common/types';
 import { RequirePermissions } from '../rbac/decorators/require-permissions.decorator';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
@@ -58,6 +59,7 @@ export class InvitationsController {
   // Redeemed by a platform user who has no tenant yet — opt out of the
   // class-level @RequireTenant().
   @Post('accept')
+  @RequireVerifiedEmail()
   @RequireTenant(false)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Accept an invitation token and join the school' })

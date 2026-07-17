@@ -5,22 +5,50 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { SchoolRequestStatus } from '@prisma/client';
+import { SchoolRequestDocumentType, SchoolRequestStatus } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TENANT_ROOT_ROLE } from '../rbac/rbac.constants';
 import { RbacService } from '../rbac/rbac.service';
+import { StorageService } from '../storage/storage.service';
 import { CreateSchoolRequestDto } from './dto/create-school-request.dto';
+import { CreateUploadUrlDto } from './dto/create-upload-url.dto';
+import { SchoolRequestDocumentDto } from './dto/school-request-document.dto';
 
 const requestSelect = {
   id: true,
   name: true,
   subdomain: true,
   status: true,
+  applicantFullName: true,
+  idNumber: true,
+  phone: true,
   reason: true,
   reviewedAt: true,
   createdAt: true,
   user: { select: { id: true, email: true, firstName: true, lastName: true } },
+  documents: {
+    select: {
+      id: true,
+      type: true,
+      fileName: true,
+      mimeType: true,
+      sizeBytes: true,
+      createdAt: true,
+    },
+  },
+};
+
+const REQUIRED_DOCUMENT_TYPES: SchoolRequestDocumentType[] = [
+  SchoolRequestDocumentType.ID_DOCUMENT,
+  SchoolRequestDocumentType.SCHOOL_CERTIFICATE,
+];
+
+/** Folder name per document type — keeps the bucket browsable by category. */
+const DOCUMENT_FOLDERS: Record<SchoolRequestDocumentType, string> = {
+  [SchoolRequestDocumentType.ID_DOCUMENT]: 'id-documents',
+  [SchoolRequestDocumentType.SCHOOL_CERTIFICATE]: 'school-certificates',
 };
 
 @Injectable()
@@ -31,19 +59,28 @@ export class SchoolRequestsService {
     private readonly prisma: PrismaService,
     private readonly rbacService: RbacService,
     private readonly auditService: AuditService,
+    private readonly storageService: StorageService,
   ) {}
+
+  /**
+   * Presigned upload slot for a KYC document. The caller PUTs the file
+   * directly to storage, then references the returned key in the create call.
+   */
+  async createUploadUrl(userId: string, dto: CreateUploadUrlDto) {
+    await this.assertTenantlessUser(userId);
+
+    const safeName = dto.fileName.replace(/[^\w.\-]/g, '_').slice(-100);
+    const key = `${this.uploadPrefix(userId)}${DOCUMENT_FOLDERS[dto.type]}/${randomUUID()}/${safeName}`;
+    const { url, expiresInSeconds } = await this.storageService.presignUpload(
+      key,
+      dto.mimeType,
+    );
+    return { key, uploadUrl: url, expiresInSeconds };
+  }
 
   /** A platform user (no school yet) applies to create one. */
   async create(userId: string, dto: CreateSchoolRequestDto) {
-    const user = await this.prisma.user.findFirst({
-      where: { id: userId, deletedAt: null },
-    });
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-    if (user.tenantId) {
-      throw new ConflictException('You already belong to a school');
-    }
+    await this.assertTenantlessUser(userId);
 
     const pending = await this.prisma.schoolRequest.findFirst({
       where: { userId, status: SchoolRequestStatus.PENDING },
@@ -53,16 +90,109 @@ export class SchoolRequestsService {
     }
 
     await this.assertSubdomainAvailable(dto.subdomain);
+    await this.assertDocumentsValid(userId, dto.documents);
 
     const request = await this.prisma.schoolRequest.create({
-      data: { userId, name: dto.name, subdomain: dto.subdomain },
+      data: {
+        userId,
+        name: dto.name,
+        subdomain: dto.subdomain,
+        applicantFullName: dto.applicantFullName,
+        idNumber: dto.idNumber,
+        phone: dto.phone,
+        documents: {
+          create: dto.documents.map((doc) => ({
+            type: doc.type,
+            fileKey: doc.key,
+            fileName: doc.fileName,
+            mimeType: doc.mimeType,
+            sizeBytes: doc.sizeBytes,
+          })),
+        },
+      },
       select: requestSelect,
     });
 
     this.logger.log(
-      `School request created: ${dto.subdomain} by ${user.email}`,
+      `School request created: ${dto.subdomain} by ${request.user.email}`,
     );
     return request;
+  }
+
+  /**
+   * SUPER_ADMIN: short-lived signed download URL for a KYC document.
+   * Files are private in storage — this is the only read path.
+   */
+  async documentDownloadUrl(requestId: string, documentId: string) {
+    const document = await this.prisma.schoolRequestDocument.findFirst({
+      where: { id: documentId, schoolRequestId: requestId },
+    });
+    if (!document) {
+      throw new NotFoundException('Document not found');
+    }
+    return this.storageService.presignDownload(
+      document.fileKey,
+      document.fileName,
+    );
+  }
+
+  /**
+   * Keys live under the app's shared-bucket folder and are namespaced per
+   * user so a request can never reference someone else's upload:
+   * Gridlearnia/school-requests/<userId>/<category>/<uuid>/<file>
+   */
+  private uploadPrefix(userId: string): string {
+    return `${this.storageService.rootPrefix}/school-requests/${userId}/`;
+  }
+
+  private async assertTenantlessUser(userId: string): Promise<void> {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, deletedAt: null },
+    });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (user.tenantId) {
+      throw new ConflictException('You already belong to a school');
+    }
+  }
+
+  /**
+   * Documents must cover both required types, reference only this user's
+   * upload namespace, and (when storage is reachable) actually exist.
+   */
+  private async assertDocumentsValid(
+    userId: string,
+    documents: SchoolRequestDocumentDto[],
+  ): Promise<void> {
+    const prefix = this.uploadPrefix(userId);
+    for (const doc of documents) {
+      if (!doc.key.startsWith(prefix) || doc.key.includes('..')) {
+        throw new BadRequestException(
+          'Document key was not issued for this user',
+        );
+      }
+    }
+
+    for (const required of REQUIRED_DOCUMENT_TYPES) {
+      if (!documents.some((doc) => doc.type === required)) {
+        throw new BadRequestException(
+          `A ${required.replace('_', ' ').toLowerCase()} upload is required`,
+        );
+      }
+    }
+
+    if (this.storageService.isConfigured) {
+      const stats = await Promise.all(
+        documents.map((doc) => this.storageService.statObject(doc.key)),
+      );
+      const missing = stats.findIndex((stat) => stat === null);
+      if (missing !== -1) {
+        throw new BadRequestException(
+          `"${documents[missing].fileName}" was not uploaded — upload it and try again`,
+        );
+      }
+    }
   }
 
   async findMine(userId: string) {

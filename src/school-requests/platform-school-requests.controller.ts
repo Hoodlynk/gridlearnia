@@ -36,6 +36,17 @@ export class PlatformSchoolRequestsController {
     return this.schoolRequestsService.stats();
   }
 
+  @Get(':id/documents/:documentId/download')
+  @ApiOperation({
+    summary: 'Signed download URL for a KYC document (SUPER_ADMIN, short-lived)',
+  })
+  documentDownloadUrl(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('documentId', ParseUUIDPipe) documentId: string,
+  ) {
+    return this.schoolRequestsService.documentDownloadUrl(id, documentId);
+  }
+
   @Post(':id/approve')
   @ApiOperation({
     summary:

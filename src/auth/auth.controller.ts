@@ -23,6 +23,7 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -75,6 +76,25 @@ export class AuthController {
     return this.authService.refreshToken(dto.refreshToken);
   }
 
+  @Public()
+  @RateLimit(perMinute(10))
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Confirm an email address with the token from the link' })
+  verifyEmail(@Body() dto: VerifyEmailDto) {
+    return this.authService.verifyEmail(dto.token);
+  }
+
+  // Tight bucket: each call sends an email.
+  @RateLimit(perMinute(2))
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Re-send the verification email for the current account' })
+  resendVerification(@CurrentUser() user: SafeUser) {
+    return this.authService.resendVerification(user.id);
+  }
+
   @Get('me')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get the authenticated user, tenant, roles, and permissions' })
@@ -88,6 +108,7 @@ export class AuthController {
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
+      emailVerified: user.emailVerified,
       roles: access.roles,
       permissions: [...access.permissions].sort(),
       tenant: tenant

@@ -1,15 +1,19 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { Tenant, TenantStatus, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { createHash, randomBytes } from 'crypto';
 import { JwtPayload } from '../common/types';
+import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RbacService } from '../rbac/rbac.service';
 import { LoginDto } from './dto/login.dto';
@@ -18,6 +22,10 @@ import { RegisterDto } from './dto/register.dto';
 const BCRYPT_ROUNDS = 10;
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 15 * 60 * 1000;
+const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+const sha256 = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
 
 export interface AuthResponse {
   accessToken: string;
@@ -45,6 +53,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly rbacService: RbacService,
+    private readonly mailService: MailService,
   ) {}
 
   /**
@@ -73,7 +82,80 @@ export class AuthService {
 
     this.logger.log(`New platform user registered: ${user.email}`);
 
+    // Fire-and-forget: registration never fails because email delivery did.
+    void this.issueAndSendVerification(user.id, user.email);
+
     return this.buildAuthResponse(user, null);
+  }
+
+  /** Consume a verification link token and mark the account verified. */
+  async verifyEmail(token: string) {
+    const record = await this.prisma.emailVerificationToken.findUnique({
+      where: { tokenHash: sha256(token) },
+      include: { user: true },
+    });
+    if (
+      !record ||
+      record.usedAt ||
+      record.expiresAt < new Date() ||
+      record.user.deletedAt
+    ) {
+      throw new BadRequestException('Invalid or expired verification link');
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.emailVerificationToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.user.update({
+        where: { id: record.userId },
+        data: { emailVerified: true, emailVerifiedAt: new Date() },
+      }),
+    ]);
+
+    this.logger.log(`Email verified: ${record.user.email}`);
+    return { verified: true, email: record.user.email };
+  }
+
+  /** Re-send the verification email; previous unused links stop working. */
+  async resendVerification(userId: string) {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, deletedAt: null },
+    });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (user.emailVerified) {
+      throw new BadRequestException('Email is already verified');
+    }
+
+    await this.prisma.emailVerificationToken.deleteMany({
+      where: { userId, usedAt: null },
+    });
+    await this.issueAndSendVerification(userId, user.email);
+    return { sent: true };
+  }
+
+  private async issueAndSendVerification(
+    userId: string,
+    email: string,
+  ): Promise<void> {
+    try {
+      const token = randomBytes(32).toString('hex');
+      await this.prisma.emailVerificationToken.create({
+        data: {
+          userId,
+          tokenHash: sha256(token),
+          expiresAt: new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS),
+        },
+      });
+      await this.mailService.sendVerificationEmail(email, token);
+    } catch (error) {
+      this.logger.error(
+        `Could not issue verification email for ${email}: ${error instanceof Error ? error.message : error}`,
+      );
+    }
   }
 
   async login(dto: LoginDto, ip?: string): Promise<AuthResponse> {

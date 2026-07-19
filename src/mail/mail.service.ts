@@ -1,5 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { resetPasswordTemplate } from './templates/reset-password.template';
+import {
+  schoolApprovedTemplate,
+  schoolChangesRequestedTemplate,
+  schoolRejectedTemplate,
+} from './templates/school-review.template';
 import { verifyEmailTemplate } from './templates/verify-email.template';
 
 interface MailMessage {
@@ -53,6 +59,56 @@ export class MailService {
   async sendVerificationEmail(to: string, token: string): Promise<void> {
     const { subject, text, html } = verifyEmailTemplate(
       this.verificationLink(token),
+    );
+    await this.send({ to, subject, text, html });
+  }
+
+  passwordResetLink(token: string): string {
+    return `${this.appUrl}/reset-password?token=${token}`;
+  }
+
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendPasswordResetEmail(to: string, token: string): Promise<void> {
+    const { subject, text, html } = resetPasswordTemplate(
+      this.passwordResetLink(token),
+    );
+    await this.send({ to, subject, text, html });
+  }
+
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendSchoolApprovedEmail(to: string, schoolName: string): Promise<void> {
+    const { subject, text, html } = schoolApprovedTemplate(
+      schoolName,
+      `${this.appUrl}/dashboard`,
+    );
+    await this.send({ to, subject, text, html });
+  }
+
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendSchoolRejectedEmail(
+    to: string,
+    schoolName: string,
+    reason: string | null,
+    attemptsLeft: number,
+  ): Promise<void> {
+    const { subject, text, html } = schoolRejectedTemplate(
+      schoolName,
+      reason,
+      attemptsLeft,
+    );
+    await this.send({ to, subject, text, html });
+  }
+
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendSchoolChangesRequestedEmail(
+    to: string,
+    schoolName: string,
+    comments: string,
+  ): Promise<void> {
+    const { subject, text, html } = schoolChangesRequestedTemplate(
+      schoolName,
+      comments,
+      `${this.appUrl}/onboarding`,
     );
     await this.send({ to, subject, text, html });
   }

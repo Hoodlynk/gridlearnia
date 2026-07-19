@@ -19,6 +19,9 @@ datasource db {
 model Tenant {
   id        String   @id @default(uuid()) @db.Uuid
   name      String   @db.VarChar(255)
+  // name lowercased with all non-alphanumerics stripped — makes school names
+  // unique regardless of spacing, punctuation, or casing
+  nameKey   String   @unique @db.VarChar(255)
   subdomain String   @unique @db.VarChar(100)
   tier      TenantTier @default(STANDARD)
   status    TenantStatus @default(TRIAL)
@@ -104,6 +107,7 @@ model User {
   userRoles               UserRole[]
   schoolRequests          SchoolRequest[]
   emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens     PasswordResetToken[]
 
   @@index([tenantId])
   @@index([tenantId, isActive])
@@ -126,6 +130,22 @@ model EmailVerificationToken {
   @@map("email_verification_tokens")
 }
 
+// Single-use password reset link. Same hardening as verification: only the
+// SHA-256 hash is stored — the raw token exists only inside the emailed link.
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.VarChar(64)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
 // ============================================
 // ONBOARDING: SCHOOL REQUESTS & INVITATIONS
 // ============================================
@@ -136,13 +156,17 @@ model SchoolRequest {
   id        String              @id @default(uuid()) @db.Uuid
   userId    String              @db.Uuid
   name      String              @db.VarChar(255)
+  // Same normalization as Tenant.nameKey; not unique here — only PENDING
+  // requests reserve a name, and that's enforced in the service.
+  nameKey   String              @db.VarChar(255)
   subdomain String              @db.VarChar(100)
   status    SchoolRequestStatus @default(PENDING)
 
   // Applicant KYC — nullable only for requests created before this was collected
-  applicantFullName String? @db.VarChar(255)
-  idNumber          String? @db.VarChar(50)
-  phone             String? @db.VarChar(30)
+  applicantFullName String?         @db.VarChar(255)
+  idType            IdDocumentType?
+  idNumber          String?         @db.VarChar(50)
+  phone             String?         @db.VarChar(30)
 
   reviewedBy String?   @db.Uuid
   reviewedAt DateTime?
@@ -156,11 +180,16 @@ model SchoolRequest {
 
   @@index([status])
   @@index([userId])
+  @@index([nameKey, status])
   @@map("school_requests")
 }
 
 enum SchoolRequestStatus {
+  DRAFT
   PENDING
+  // Reviewer asked for corrections — editable by the applicant (comments in
+  // `reason`) and resubmittable, unlike a terminal REJECTED.
+  CHANGES_REQUESTED
   APPROVED
   REJECTED
 }
@@ -172,6 +201,9 @@ model SchoolRequestDocument {
   id              String                    @id @default(uuid()) @db.Uuid
   schoolRequestId String                    @db.Uuid
   type            SchoolRequestDocumentType
+  // Which face of the ID this scan is (FRONT/BACK for national IDs);
+  // null for passports and certificates.
+  side            DocumentSide?
   fileKey         String                    @db.VarChar(512)
   fileName        String                    @db.VarChar(255)
   mimeType        String                    @db.VarChar(100)
@@ -183,6 +215,18 @@ model SchoolRequestDocument {
 
   @@index([schoolRequestId])
   @@map("school_request_documents")
+}
+
+// What kind of identity document the applicant is using. National IDs need
+// front and back scans; passports need only the photo page.
+enum IdDocumentType {
+  NATIONAL_ID
+  PASSPORT
+}
+
+enum DocumentSide {
+  FRONT
+  BACK
 }
 
 enum SchoolRequestDocumentType {

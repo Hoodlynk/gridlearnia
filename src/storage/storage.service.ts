@@ -17,13 +17,13 @@ export interface StoredObject {
   mimeType?: string;
 }
 
-const UPLOAD_URL_TTL_SECONDS = 300;
 const DOWNLOAD_URL_TTL_SECONDS = 300;
 
 /**
- * DigitalOcean Spaces (S3-compatible) via presigned URLs — files never
- * pass through the API. The bucket stays private; access is only ever
- * granted through short-lived signed URLs.
+ * DigitalOcean Spaces (S3-compatible). Uploads pass through the API
+ * (browser → API → Spaces) so the shared bucket needs no CORS rules; the
+ * bucket stays private and reads are only ever granted through short-lived
+ * signed URLs.
  */
 @Injectable()
 export class StorageService {
@@ -65,21 +65,25 @@ export class StorageService {
     return this.client !== null;
   }
 
-  /** Presigned PUT the browser uploads directly to. Content-Type is locked into the signature. */
-  async presignUpload(key: string, mimeType: string) {
+  /**
+   * Server-side upload: the API receives the file and pushes it to storage
+   * itself, so the browser never needs bucket CORS. No ACL — the shared
+   * bucket is private and reads only ever happen via presigned GETs.
+   */
+  async putObject(
+    key: string,
+    body: Buffer,
+    mimeType: string,
+  ): Promise<void> {
     const client = this.requireClient();
-    const url = await getSignedUrl(
-      client,
-      // No ACL param: signing one would force the client to send an
-      // x-amz-acl header. The bucket is private by default.
+    await client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
+        Body: body,
         ContentType: mimeType,
       }),
-      { expiresIn: UPLOAD_URL_TTL_SECONDS },
     );
-    return { url, expiresInSeconds: UPLOAD_URL_TTL_SECONDS };
   }
 
   /** Short-lived signed GET for reviewers. */

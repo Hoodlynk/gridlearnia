@@ -1,10 +1,12 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, Tenant } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { schoolNameKey } from '../common/utils/school-name-key';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlatformUpdateTenantDto } from './dto/platform-update-tenant.dto';
 import { UpdateTenantDto } from './dto/update-tenant.dto';
@@ -163,11 +165,30 @@ export class TenantsService {
     return deleted;
   }
 
-  update(tenantId: string, dto: UpdateTenantDto) {
+  async update(tenantId: string, dto: UpdateTenantDto) {
+    // Renames keep the normalized-name uniqueness that creation enforces.
+    let nameKey: string | undefined;
+    if (dto.name !== undefined) {
+      nameKey = schoolNameKey(dto.name);
+      if (!nameKey) {
+        throw new BadRequestException(
+          'School name must contain letters or numbers',
+        );
+      }
+      const taken = await this.prisma.tenant.findFirst({
+        where: { nameKey, id: { not: tenantId } },
+      });
+      if (taken) {
+        throw new ConflictException(
+          'A school with this name already exists',
+        );
+      }
+    }
+
     return this.prisma.tenant.update({
       where: { id: tenantId },
       data: {
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.name !== undefined ? { name: dto.name, nameKey } : {}),
         ...(dto.settings !== undefined
           ? { settings: dto.settings as Prisma.InputJsonValue }
           : {}),

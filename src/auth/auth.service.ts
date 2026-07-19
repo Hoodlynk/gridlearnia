@@ -23,6 +23,9 @@ const BCRYPT_ROUNDS = 10;
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 15 * 60 * 1000;
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+// Reset links gate account takeover, so they live much shorter than
+// verification links. Keep in sync with the copy in the reset email template.
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
 
 const sha256 = (value: string) =>
   createHash('sha256').update(value).digest('hex');
@@ -158,7 +161,105 @@ export class AuthService {
     }
   }
 
+  /**
+   * Issue a password reset link. Always answers generically — whether the
+   * email exists, is soft-deleted, or the send fails, the caller learns
+   * nothing about account existence.
+   */
+  async forgotPassword(email: string) {
+    const user = await this.prisma.user.findFirst({
+      where: { email, deletedAt: null },
+    });
+
+    if (user) {
+      // Fire-and-forget: the response must not vary with delivery outcome.
+      void this.issueAndSendPasswordReset(user.id, user.email);
+    }
+
+    return { sent: true };
+  }
+
+  private async issueAndSendPasswordReset(
+    userId: string,
+    email: string,
+  ): Promise<void> {
+    try {
+      // Previous unused links stop working — only the newest reset is live.
+      await this.prisma.passwordResetToken.deleteMany({
+        where: { userId, usedAt: null },
+      });
+      const token = randomBytes(32).toString('hex');
+      await this.prisma.passwordResetToken.create({
+        data: {
+          userId,
+          tokenHash: sha256(token),
+          expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS),
+        },
+      });
+      await this.mailService.sendPasswordResetEmail(email, token);
+    } catch (error) {
+      this.logger.error(
+        `Could not issue password reset email for ${email}: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /** Consume a reset link token and set the new password. */
+  async resetPassword(token: string, password: string) {
+    const record = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash: sha256(token) },
+      include: { user: true },
+    });
+    if (
+      !record ||
+      record.usedAt ||
+      record.expiresAt < new Date() ||
+      record.user.deletedAt
+    ) {
+      throw new BadRequestException('Invalid or expired reset link');
+    }
+
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    await this.prisma.$transaction([
+      this.prisma.passwordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.user.update({
+        where: { id: record.userId },
+        // A successful reset proves control of the mailbox — clear any
+        // brute-force lockout so the user can sign in immediately.
+        data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
+      }),
+    ]);
+
+    this.logger.log(`Password reset: ${record.user.email}`);
+    return { reset: true };
+  }
+
+  /**
+   * School-app login. SUPER_ADMIN accounts are refused here — the backend
+   * itself enforces the console split, the frontends never have to.
+   */
   async login(dto: LoginDto, ip?: string): Promise<AuthResponse> {
+    const response = await this.authenticate(dto, ip);
+    if (response.user.roles.includes('SUPER_ADMIN')) {
+      this.logger.warn(
+        `School app login denied for platform admin account: ${dto.email} ip=${ip ?? 'unknown'}`,
+      );
+      throw new ForbiddenException(
+        'Platform administrators must sign in through the admin console',
+      );
+    }
+    return response;
+  }
+
+  /** Shared credential flow for both logins: verify, lock out, book-keep. */
+  private async authenticate(
+    dto: LoginDto,
+    ip?: string,
+  ): Promise<AuthResponse> {
     const user = await this.prisma.user.findFirst({
       where: { email: dto.email, deletedAt: null },
       include: { tenant: true },
@@ -234,7 +335,7 @@ export class AuthService {
    * itself refuses non-SUPER_ADMIN accounts — the frontend never has to.
    */
   async adminLogin(dto: LoginDto, ip?: string): Promise<AuthResponse> {
-    const response = await this.login(dto, ip);
+    const response = await this.authenticate(dto, ip);
     if (!response.user.roles.includes('SUPER_ADMIN')) {
       this.logger.warn(
         `Admin console login denied for non-admin account: ${dto.email} ip=${ip ?? 'unknown'}`,

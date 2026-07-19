@@ -1,6 +1,16 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { SchoolRequestDocumentType } from '@prisma/client';
-import { IsEnum, IsIn, IsInt, IsString, Length, Max, MaxLength, Min } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { DocumentSide, SchoolRequestDocumentType } from '@prisma/client';
+import {
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Length,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 /** File types accepted for KYC documents. */
 export const DOCUMENT_MIME_TYPES = [
@@ -17,6 +27,14 @@ export class SchoolRequestDocumentDto {
   @ApiProperty({ enum: SchoolRequestDocumentType })
   @IsEnum(SchoolRequestDocumentType)
   type: SchoolRequestDocumentType;
+
+  @ApiPropertyOptional({
+    enum: DocumentSide,
+    description: 'FRONT/BACK for national ID scans; omit for passports and certificates',
+  })
+  @IsOptional()
+  @IsEnum(DocumentSide)
+  side?: DocumentSide;
 
   @ApiProperty({ description: 'Storage key returned by POST /school-requests/uploads' })
   @IsString()

@@ -20,9 +20,11 @@ import { Public } from '../common/decorators/public.decorator';
 import { SafeUser } from '../common/types';
 import { RbacService } from '../rbac/rbac.service';
 import { AuthService } from './auth.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 
 @ApiTags('auth')
@@ -83,6 +85,30 @@ export class AuthController {
   @ApiOperation({ summary: 'Confirm an email address with the token from the link' })
   verifyEmail(@Body() dto: VerifyEmailDto) {
     return this.authService.verifyEmail(dto.token);
+  }
+
+  @Public()
+  // Tight bucket: each call can send an email, and the endpoint is an
+  // account-enumeration probe target.
+  @RateLimit(perMinute(2))
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request a password reset link (always answers generically)',
+  })
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto.email);
+  }
+
+  @Public()
+  // Same tight bucket as login — this endpoint accepts password guesses
+  // against a token, so keep it brute-force-resistant.
+  @RateLimit(perMinute(5))
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Set a new password with the token from the link' })
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto.token, dto.password);
   }
 
   // Tight bucket: each call sends an email.

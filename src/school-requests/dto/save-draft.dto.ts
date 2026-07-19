@@ -1,11 +1,11 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IdDocumentType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
-  ArrayMinSize,
   IsArray,
   IsEnum,
+  IsOptional,
   IsString,
   Length,
   Matches,
@@ -13,7 +13,11 @@ import {
 } from 'class-validator';
 import { SchoolRequestDocumentDto } from './school-request-document.dto';
 
-export class CreateSchoolRequestDto {
+/**
+ * Same shape as a full application, but documents are optional — a draft
+ * is exactly for the case where uploads aren't (all) done yet.
+ */
+export class SaveDraftDto {
   @ApiProperty({ example: 'Sunrise Academy' })
   @IsString()
   @Length(2, 255)
@@ -30,7 +34,7 @@ export class CreateSchoolRequestDto {
   })
   subdomain: string;
 
-  @ApiProperty({ example: 'Jane Wanjiku Kamau', description: 'Applicant legal name as on the ID document' })
+  @ApiProperty({ example: 'Jane Wanjiku Kamau' })
   @IsString()
   @Length(2, 255)
   applicantFullName: string;
@@ -43,7 +47,7 @@ export class CreateSchoolRequestDto {
   @IsEnum(IdDocumentType)
   idType: IdDocumentType;
 
-  @ApiProperty({ example: '32115678', description: 'National ID or passport number' })
+  @ApiProperty({ example: '32115678' })
   @IsString()
   @Matches(/^[A-Za-z0-9][A-Za-z0-9\-\/ ]{2,48}[A-Za-z0-9]$/, {
     message: 'idNumber must be 4-50 letters, numbers, hyphens, or slashes',
@@ -60,15 +64,11 @@ export class CreateSchoolRequestDto {
   })
   phone: string;
 
-  @ApiProperty({
-    type: [SchoolRequestDocumentDto],
-    description:
-      'Uploaded KYC files — must include one ID_DOCUMENT and one SCHOOL_CERTIFICATE',
-  })
+  @ApiPropertyOptional({ type: [SchoolRequestDocumentDto] })
+  @IsOptional()
   @IsArray()
-  @ArrayMinSize(2)
   @ArrayMaxSize(5)
   @ValidateNested({ each: true })
   @Type(() => SchoolRequestDocumentDto)
-  documents: SchoolRequestDocumentDto[];
+  documents?: SchoolRequestDocumentDto[];
 }

@@ -7,6 +7,8 @@ import {
 } from '@nestjs/platform-fastify';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
+import { DOCUMENT_MAX_BYTES } from './school-requests/dto/school-request-document.dto';
 import { randomUUID } from 'crypto';
 import { IncomingMessage } from 'http';
 import { AppModule } from './app.module';
@@ -36,6 +38,11 @@ async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
 
   await app.register(helmet);
+  // KYC documents arrive as multipart and are streamed to object storage
+  // server-side (the browser never talks to Spaces — no bucket CORS needed).
+  await app.register(multipart, {
+    limits: { fileSize: DOCUMENT_MAX_BYTES, files: 1 },
+  });
   app.enableCors({
     origin: config.getOrThrow<string[]>('cors.allowedOrigins'),
     credentials: true,

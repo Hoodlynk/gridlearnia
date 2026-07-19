@@ -13,6 +13,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { SafeUser } from '../common/types';
 import { RequireSuperAdmin } from '../rbac/decorators/require-super-admin.decorator';
 import { RejectSchoolRequestDto } from './dto/reject-school-request.dto';
+import { RequestChangesDto } from './dto/request-changes.dto';
 import { SchoolRequestsService } from './school-requests.service';
 
 /** Platform staff only. */
@@ -57,6 +58,23 @@ export class PlatformSchoolRequestsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.schoolRequestsService.approve(id, reviewer.id);
+  }
+
+  @Post(':id/request-changes')
+  @ApiOperation({
+    summary:
+      'Send a request back for corrections with reviewer comments (applicant can edit and resubmit)',
+  })
+  requestChanges(
+    @CurrentUser() reviewer: SafeUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RequestChangesDto,
+  ) {
+    return this.schoolRequestsService.requestChanges(
+      id,
+      reviewer.id,
+      dto.comments,
+    );
   }
 
   @Post(':id/reject')

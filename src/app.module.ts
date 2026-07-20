@@ -1,6 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { AcademicsModule } from './academics/academics.module';
+import { SisModule } from './sis/sis.module';
+import { AttendanceModule } from './attendance/attendance.module';
+import { AssessmentModule } from './assessment/assessment.module';
+import { StaffModule } from './staff/staff.module';
+import { TimetableModule } from './timetable/timetable.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -40,6 +46,12 @@ import { UsersModule } from './users/users.module';
     TenantsModule,
     SchoolRequestsModule,
     InvitationsModule,
+    AcademicsModule,
+    SisModule,
+    AttendanceModule,
+    AssessmentModule,
+    StaffModule,
+    TimetableModule,
     HealthModule,
   ],
   providers: [

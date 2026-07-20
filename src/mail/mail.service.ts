@@ -1,5 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { invitationTemplate } from './templates/invitation.template';
+import { timetableSwapTemplate } from './templates/timetable-swap.template';
+import { loginCodeTemplate } from './templates/login-code.template';
 import { resetPasswordTemplate } from './templates/reset-password.template';
 import {
   schoolApprovedTemplate,
@@ -63,6 +66,16 @@ export class MailService {
     await this.send({ to, subject, text, html });
   }
 
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendLoginCodeEmail(
+    to: string,
+    code: string,
+    ttlMinutes: number,
+  ): Promise<void> {
+    const { subject, text, html } = loginCodeTemplate(code, ttlMinutes);
+    await this.send({ to, subject, text, html });
+  }
+
   passwordResetLink(token: string): string {
     return `${this.appUrl}/reset-password?token=${token}`;
   }
@@ -71,6 +84,29 @@ export class MailService {
   async sendPasswordResetEmail(to: string, token: string): Promise<void> {
     const { subject, text, html } = resetPasswordTemplate(
       this.passwordResetLink(token),
+    );
+    await this.send({ to, subject, text, html });
+  }
+
+  /** Onboarding is where a tenantless user redeems an invitation; the query
+   *  param opens the "join a school" step with the code pre-filled. */
+  invitationLink(token: string): string {
+    return `${this.appUrl}/onboarding?invitation=${token}`;
+  }
+
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendInvitationEmail(
+    to: string,
+    token: string,
+    schoolName: string,
+    roleKeys: string[],
+    expiresInDays: number,
+  ): Promise<void> {
+    const { subject, text, html } = invitationTemplate(
+      this.invitationLink(token),
+      schoolName,
+      roleKeys,
+      expiresInDays,
     );
     await this.send({ to, subject, text, html });
   }
@@ -109,6 +145,23 @@ export class MailService {
       schoolName,
       comments,
       `${this.appUrl}/onboarding`,
+    );
+    await this.send({ to, subject, text, html });
+  }
+
+  /** Fire-and-forget — call with `void`, never await in a request path. */
+  async sendSwapDecisionEmail(
+    to: string,
+    firstName: string,
+    lesson: string,
+    outcome: 'approved' | 'rejected',
+    note?: string,
+  ): Promise<void> {
+    const { subject, text, html } = timetableSwapTemplate(
+      firstName,
+      lesson,
+      outcome,
+      note,
     );
     await this.send({ to, subject, text, html });
   }

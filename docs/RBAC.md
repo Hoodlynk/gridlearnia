@@ -2,7 +2,9 @@
 
 School Management System role-based access control design. Each **tenant is a school**; roles below are scoped to a tenant unless marked platform-level.
 
-> **Status: implemented** (migration `20260715223646_rbac`). Roles/permissions live in the database, seeded from the matrix in `prisma/seed.ts`; enforcement is the global `PermissionsGuard` + `@RequirePermissions()`. Not yet built: row-level scope rules (§6), clone-on-write customization (§10), audit writes.
+> **Status: implemented** (migration `20260715223646_rbac`). Roles/permissions live in the database, seeded from the matrix in `prisma/seed.ts`; enforcement is the global `PermissionsGuard` + `@RequirePermissions()`. **Audit writes are implemented** (`AuditService` → `audit_logs` + alert webhook). Clone-on-write customization (§10) is **implemented for curricula & grading schemes** (see [ACADEMICS.md](ACADEMICS.md)) but **not yet for roles**. Not yet built: row-level scope rules (§6), role clone-on-write.
+>
+> **Feature flags interact with RBAC**: `TenantModule.moduleKey` matches `Permission.module`, so a permission is only effective while its module is enabled for the tenant. A short core set (`school-settings`, `user-management`) can never be disabled. See ACADEMICS.md §2.
 
 ---
 
@@ -168,7 +170,7 @@ Supporting scope tables (future, with the academic schema): `teacher_assignments
 
 ## 8. Enforcement in NestJS — *implemented*
 
-Global guard chain: `ThrottlerGuard → JwtAuthGuard → PermissionsGuard` (registered in `app.module.ts`).
+Global guard chain: `IpRateLimitGuard → JwtAuthGuard → EmailVerifiedGuard → TenantGuard → SuperAdminGuard → PermissionsGuard` (registered in `app.module.ts`; see ARCHITECTURE.md §3).
 
 ```ts
 // controller (src/rbac/decorators/require-permissions.decorator.ts)
@@ -182,7 +184,7 @@ updateExam(...) {}
 - **JWT stays slim**: the token carries `sub` + `tenantId` + `email` only — no roles or permissions — so role changes take effect on the next request, not at token expiry. `GET /auth/me` returns the resolved `roles` and `permissions` arrays for the frontend to drive menus/buttons.
 - **Registration & onboarding**: `POST /auth/register` creates a platform-level user (no school, zero roles ⇒ zero access). Schools and role grants come from the onboarding flow — see [ONBOARDING.md](ONBOARDING.md).
 - **Scope enforcement lives in services** (with §6): every service method adds the resolved scope (e.g. allowed `classIds`) to the Prisma `where` — same pattern as `tenantId` today.
-- ☐ **Audit** (not yet built): every `approve`, `delete`, and `export` on Finance/Student Records should write to `audit_logs` (table already exists).
+- ✔ **Audit** (implemented): `AuditService` writes role grants/revokes, school review outcomes, campus + module changes, invitation acceptance, and super-admin creation to `audit_logs`, and fires an alert webhook on critical events. Coverage of finance/records `approve`/`delete`/`export` follows when those modules are built.
 
 ## 9. Role Administration API & Guard Rails — *implemented*
 
@@ -203,9 +205,13 @@ Guard rails, strictest first:
 
 Seeding: `npm run prisma:seed` — idempotent; in production it seeds only roles/permissions (no demo school). Run once per environment after migrations.
 
-## 10. Per-Tenant Customization (clone-on-write) — *designed, not yet implemented*
+## 10. Per-Tenant Customization (clone-on-write) — *pattern implemented for academics; roles pending*
 
-The schema already supports this (`Role.tenantId` + the shadowing lookup in `RbacService.resolveRole`); what's missing is the clone/edit API. Schools will be able to adjust roles **and their permissions** without affecting other tenants:
+The same clone-on-write pattern is **already shipped for curricula & grading
+schemes** (adopt a system template → tenant-owned editable copy; see
+[ACADEMICS.md](ACADEMICS.md) §3). For **roles**, the schema supports it
+(`Role.tenantId` + the shadowing lookup in `RbacService.resolveRole`) but the
+clone/edit API is not built yet. Schools will be able to adjust roles **and their permissions** without affecting other tenants:
 
 - **System roles** (`tenantId = null`) are the seeded defaults shared by all schools. They are never edited in place.
 - **Editing a role clones it**: the first time a school modifies e.g. TEACHER, the role row + its `role_permissions` are copied with their `tenantId`. Edits apply to the clone only.

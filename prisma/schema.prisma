@@ -6,9 +6,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider  = "postgresql"
   // Runtime queries go through the Supabase pooler (pgBouncer, port 6543).
-  url      = env("DATABASE_URL")
+  url       = env("DATABASE_URL")
   // Migrations need a direct connection (port 5432) — pgBouncer can't run DDL sessions.
   directUrl = env("DIRECT_URL")
 }
@@ -17,41 +17,154 @@ datasource db {
 // TENANTS TABLE
 // ============================================
 model Tenant {
-  id        String   @id @default(uuid()) @db.Uuid
-  name      String   @db.VarChar(255)
+  id        String       @id @default(uuid()) @db.Uuid
+  name      String       @db.VarChar(255)
   // name lowercased with all non-alphanumerics stripped — makes school names
   // unique regardless of spacing, punctuation, or casing
-  nameKey   String   @unique @db.VarChar(255)
-  subdomain String   @unique @db.VarChar(100)
-  tier      TenantTier @default(STANDARD)
+  nameKey   String       @unique @db.VarChar(255)
+  subdomain String       @unique @db.VarChar(100)
+  tier      TenantTier   @default(STANDARD)
   status    TenantStatus @default(TRIAL)
-  
+
+  // Localization — the organization's defaults, inherited by every campus
+  // unless a campus overrides them. Kept as flat columns (not a subsystem):
+  // everything downstream (fee formatting, report dates, SMS sender, calendar)
+  // reads these instead of hardcoding a country.
+  country    String @default("KE") @db.VarChar(2) // ISO 3166-1 alpha-2
+  currency   String @default("KES") @db.VarChar(3) // ISO 4217
+  timezone   String @default("Africa/Nairobi") @db.VarChar(60) // IANA tz
+  locale     String @default("en") @db.VarChar(10) // BCP-47
+  dateFormat String @default("DD/MM/YYYY") @db.VarChar(20)
+
   // Tenant configuration
-  settings  Json     @default("{}")
-  
+  settings Json @default("{}")
+
   // Resource limits
-  maxUsers         Int @default(10)
-  maxStorageGb     Int @default(5)
+  maxUsers          Int @default(10)
+  maxStorageGb      Int @default(5)
   maxApiCallsPerDay Int @default(10000)
-  
+
   // Billing
   subscriptionStartDate DateTime?
   subscriptionEndDate   DateTime?
-  
+
   // Metadata
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
-  
+
   // Relations
-  users       User[]
-  projects    Project[]
-  invitations Invitation[]
+  users                 User[]
+  projects              Project[]
+  invitations           Invitation[]
+  campuses              Campus[]
+  modules               TenantModule[]
+  // Academic engine (tenant-owned rows; system templates have tenantId = null)
+  curricula             Curriculum[]
+  subjects              Subject[]
+  gradingSchemes        GradingScheme[]
+  academicYears         AcademicYear[]
+  sections              Section[]
+  grades                Grade[]
+  classes               Class[]
+  // Student information system (Phase 2)
+  students              Student[]
+  guardians             Guardian[]
+  enrollments           Enrollment[]
+  // Attendance & assessment (Phase 3)
+  attendanceRecords     AttendanceRecord[]
+  assessments           Assessment[]
+  assessmentScores      AssessmentScore[]
+  // Staff & teaching (Phase 4)
+  staff                 Staff[]
+  departments           Department[]
+  teachingAssignments   TeachingAssignment[]
+  // Timetable setup (Phase 5a)
+  timetableSettings     TimetableSettings?
+  periods               Period[]
+  rooms                 Room[]
+  staffUnavailability   StaffUnavailability[]
+  timetables            Timetable[]
+  timetableEntries      TimetableEntry[]
+  timetableRuns         TimetableRun[]
+  timetableSwapRequests TimetableSwapRequest[]
 
   @@index([subdomain])
   @@index([status])
   @@index([tier])
   @@map("tenants")
+}
+
+// ============================================
+// CAMPUSES (physical locations of an organization)
+// ============================================
+// A campus is a *physical site* of one organization — not an academic level.
+// Primary/secondary are Sections (added in the academic engine), which live
+// under a campus; one campus can host several sections. Every tenant gets a
+// "Main Campus" auto-created on approval, so single-site schools never think
+// about this; multi-site schools add more campuses. Operational tables
+// (enrollment, attendance, …) carry campusId so the split is never retrofit.
+model Campus {
+  id       String       @id @default(uuid()) @db.Uuid
+  tenantId String       @db.Uuid
+  name     String       @db.VarChar(255)
+  // Short stable handle, unique within the tenant (e.g. "MAIN", "MOMBASA").
+  code     String       @db.VarChar(50)
+  // Exactly one main campus per tenant (the default auto-created one).
+  isMain   Boolean      @default(false)
+  status   CampusStatus @default(ACTIVE)
+
+  // Optional contact + localization overrides — null means inherit the tenant.
+  address  String? @db.Text
+  phone    String? @db.VarChar(30)
+  timezone String? @db.VarChar(60)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sections    Section[]
+  classes     Class[]
+  students    Student[]
+  enrollments Enrollment[]
+  staff       Staff[]
+  rooms       Room[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("campuses")
+}
+
+enum CampusStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// ============================================
+// TENANT MODULES (feature flags per organization)
+// ============================================
+// One row per (tenant, module). `moduleKey` matches Permission.module, so a
+// permission is only *live* when its module is enabled here — feature-gating
+// and RBAC reinforce each other. Modeled as a table (not settings JSON) so it
+// can be queried, billed against, and joined. Seeded for every module on
+// approval; a school opts add-ons on/off by flipping `enabled`.
+model TenantModule {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @db.Uuid
+  moduleKey String  @db.VarChar(50)
+  enabled   Boolean @default(true)
+  // Per-module quotas/config (e.g. { "maxSmsPerMonth": 5000 }).
+  limits    Json    @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, moduleKey])
+  @@index([tenantId])
+  @@map("tenant_modules")
 }
 
 enum TenantTier {
@@ -89,18 +202,18 @@ model User {
   isActive        Boolean   @default(true)
   emailVerified   Boolean   @default(false)
   emailVerifiedAt DateTime?
-  
+
   // Security
   lastLoginAt         DateTime?
   lastLoginIp         String?   @db.Inet
   failedLoginAttempts Int       @default(0)
   lockedUntil         DateTime?
-  
+
   // Metadata
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
-  
+
   // Relations
   tenant                  Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   projects                Project[]
@@ -108,10 +221,34 @@ model User {
   schoolRequests          SchoolRequest[]
   emailVerificationTokens EmailVerificationToken[]
   passwordResetTokens     PasswordResetToken[]
+  loginTwoFactorCodes     LoginTwoFactorCode[]
+  // Optional SIS links — a user account that is a student or a guardian.
+  student                 Student?
+  guardian                Guardian?
+  // Optional staff profile — a user account that is an employee (Phase 4).
+  staff                   Staff?
 
   @@index([tenantId])
   @@index([tenantId, isActive])
   @@map("users")
+}
+
+// Short-lived 6-digit login code (email second factor). Only the SHA-256
+// hash is stored — the raw code exists only inside the email. `attempts`
+// caps guessing against a single code.
+model LoginTwoFactorCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  codeHash  String    @db.VarChar(64)
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("login_two_factor_codes")
 }
 
 // Single-use email verification link. Only the SHA-256 hash of the token is
@@ -167,6 +304,11 @@ model SchoolRequest {
   idType            IdDocumentType?
   idNumber          String?         @db.VarChar(50)
   phone             String?         @db.VarChar(30)
+
+  // Education bands the applicant says the school offers (e.g. Primary,
+  // Secondary). On approval these become Section rows under the main campus.
+  // Empty = the applicant skipped the picker; they set structure up later.
+  sections String[]
 
   reviewedBy String?   @db.Uuid
   reviewedAt DateTime?
@@ -248,13 +390,19 @@ model Invitation {
   expiresAt  DateTime
   acceptedAt DateTime?
 
+  // When an invite is sent *for* a staff profile, accepting it links the new
+  // account back to that Staff row (Staff.userId) — see docs/STAFF-TEACHING.md.
+  staffId String? @db.Uuid
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  staff  Staff? @relation(fields: [staffId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([email])
+  @@index([staffId])
   @@map("invitations")
 }
 
@@ -333,29 +481,952 @@ model UserRole {
 }
 
 // ============================================
+// ACADEMIC ENGINE (see docs — Phase 1)
+// ============================================
+// Two axes, kept separate on purpose:
+//   • Campus = a physical site (Phase 0).
+//   • Section = an academic band (Pre-Primary / Primary / Secondary …) that
+//     lives under a campus. This is where "primary vs secondary" is modeled.
+// Hierarchy: Tenant → Campus → Section → Grade → Class.
+//
+// Curriculum and GradingScheme use the same template pattern as Role: a
+// system row (tenantId = null) is shared by every school; a school that needs
+// to customize gets a tenant-owned copy with the same key. A partial unique
+// index (added in the migration) keeps system keys globally unique, since
+// Postgres treats NULLs as distinct.
+
+model Curriculum {
+  id       String  @id @default(uuid()) @db.Uuid
+  // null = system template shared by all schools; set = tenant-owned copy.
+  tenantId String? @db.Uuid
+  key      String  @db.VarChar(50) // "CBC", "8-4-4", "IGCSE", "IB"
+  name     String  @db.VarChar(150)
+  country  String? @db.VarChar(2) // ISO 3166-1 alpha-2 origin, optional
+  isSystem Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant?   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subjects Subject[]
+  sections Section[]
+
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("curricula")
+}
+
+model Subject {
+  id           String  @id @default(uuid()) @db.Uuid
+  tenantId     String? @db.Uuid // null = system subject (part of a system curriculum)
+  curriculumId String  @db.Uuid
+  code         String  @db.VarChar(30) // "MATH", "ENG"
+  name         String  @db.VarChar(150) // "Mathematics"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant              Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  curriculum          Curriculum           @relation(fields: [curriculumId], references: [id], onDelete: Cascade)
+  assessments         Assessment[]
+  departmentLinks     DepartmentSubject[]
+  teachingAssignments TeachingAssignment[]
+  timetableEntries    TimetableEntry[]
+
+  @@unique([curriculumId, code])
+  @@index([curriculumId])
+  @@index([tenantId])
+  @@map("subjects")
+}
+
+model GradingScheme {
+  id       String            @id @default(uuid()) @db.Uuid
+  // null = system template shared by all schools; set = tenant-owned copy.
+  tenantId String?           @db.Uuid
+  key      String            @db.VarChar(50) // "PERCENTAGE", "CBC-COMPETENCY", "LETTER-KE", "GPA-4"
+  name     String            @db.VarChar(150)
+  type     GradingSchemeType
+  isSystem Boolean           @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant?       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bands    GradingBand[]
+  sections Section[]
+
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("grading_schemes")
+}
+
+enum GradingSchemeType {
+  PERCENTAGE // raw 0–100
+  LETTER // A, B, C … mapped from score ranges
+  POINTS // GPA-style points
+  COMPETENCY // EE / ME / AE / BE (CBC)
+  PASS_FAIL
+}
+
+// One tier within a scheme. `minScore`/`maxScore` map a raw score to the band;
+// `points` carries the GPA value for POINTS schemes.
+model GradingBand {
+  id       String   @id @default(uuid()) @db.Uuid
+  schemeId String   @db.Uuid
+  label    String   @db.VarChar(30) // "A", "EE", "Pass"
+  order    Int
+  minScore Decimal? @db.Decimal(5, 2)
+  maxScore Decimal? @db.Decimal(5, 2)
+  points   Decimal? @db.Decimal(4, 2)
+  remark   String?  @db.VarChar(100) // "Exceeding Expectation"
+
+  scheme GradingScheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+
+  @@unique([schemeId, order])
+  @@index([schemeId])
+  @@map("grading_bands")
+}
+
+// The school's calendar. Terms/semesters/quarters are AcademicTerm rows, so
+// the term count is configuration, not a hardcoded assumption.
+model AcademicYear {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  name      String   @db.VarChar(50) // "2026", "2026/2027"
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  // At most one current year per tenant (enforced in the service).
+  isCurrent Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  terms               AcademicTerm[]
+  classes             Class[]
+  enrollments         Enrollment[]
+  assessments         Assessment[]
+  teachingAssignments TeachingAssignment[]
+  timetables          Timetable[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("academic_years")
+}
+
+model AcademicTerm {
+  id             String   @id @default(uuid()) @db.Uuid
+  academicYearId String   @db.Uuid
+  name           String   @db.VarChar(50) // "Term 1", "Semester 1", "Quarter 1"
+  order          Int
+  startDate      DateTime @db.Date
+  endDate        DateTime @db.Date
+
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  assessments  Assessment[]
+  timetables   Timetable[]
+
+  @@unique([academicYearId, order])
+  @@index([academicYearId])
+  @@map("academic_terms")
+}
+
+// Academic band within a campus: "Primary", "Secondary", "Pre-Primary".
+// Carries the curriculum + default grading scheme, since these commonly
+// differ between, say, primary and secondary in the same school.
+model Section {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  campusId String @db.Uuid
+  name     String @db.VarChar(100)
+  order    Int    @default(0)
+
+  curriculumId    String? @db.Uuid
+  gradingSchemeId String? @db.Uuid
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campus        Campus         @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  curriculum    Curriculum?    @relation(fields: [curriculumId], references: [id])
+  gradingScheme GradingScheme? @relation(fields: [gradingSchemeId], references: [id])
+  grades        Grade[]
+
+  @@index([tenantId])
+  @@index([campusId])
+  @@map("sections")
+}
+
+// A year level within a section: "Grade 1", "Form 2", "PP1". `order` gives
+// the progression regardless of the label a curriculum uses.
+model Grade {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @db.Uuid
+  sectionId String @db.Uuid
+  name      String @db.VarChar(50)
+  order     Int
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  classes Class[]
+
+  @@index([tenantId])
+  @@index([sectionId])
+  @@map("grades")
+}
+
+// A concrete stream of students in a grade for a given academic year, e.g.
+// "Grade 4 East" in 2026. Enrollment (Phase 2) joins a student to a class.
+model Class {
+  id             String  @id @default(uuid()) @db.Uuid
+  tenantId       String  @db.Uuid
+  campusId       String  @db.Uuid
+  gradeId        String  @db.Uuid
+  academicYearId String  @db.Uuid
+  name           String  @db.VarChar(50) // "East", "Blue", "A"
+  // The CLASS_TEACHER responsible for this stream (Phase 4).
+  classTeacherId String? @db.Uuid
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campus              Campus               @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  grade               Grade                @relation(fields: [gradeId], references: [id], onDelete: Cascade)
+  academicYear        AcademicYear         @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  classTeacher        Staff?               @relation("ClassTeacher", fields: [classTeacherId], references: [id], onDelete: SetNull)
+  enrollments         Enrollment[]
+  attendanceRecords   AttendanceRecord[]
+  assessments         Assessment[]
+  teachingAssignments TeachingAssignment[]
+  timetableEntries    TimetableEntry[]
+
+  @@index([tenantId])
+  @@index([gradeId])
+  @@index([academicYearId])
+  @@map("classes")
+}
+
+// ============================================
+// STUDENT INFORMATION SYSTEM (see docs — Phase 2)
+// ============================================
+// The roster that sits on top of the academic engine:
+//   • Student   — a person admitted to the school (optionally linked to a login
+//                 User account so a student can sign in later).
+//   • Guardian  — a parent/guardian (also optionally a login account).
+//   • StudentGuardian — the many-to-many between them, with relationship label.
+//   • Enrollment — a Student joined to a Class for one AcademicYear. This is the
+//                 bridge into the Section→Grade→Class structure Phase 1 built.
+// campusId is denormalized onto Student and Enrollment (derived from the class)
+// so campus-scoped queries never need to walk the whole hierarchy.
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum StudentStatus {
+  ACTIVE // currently attending
+  INACTIVE // temporarily not attending
+  GRADUATED // completed the school
+  TRANSFERRED // left for another school
+  WITHDRAWN // left / dropped out
+}
+
+enum EnrollmentStatus {
+  ENROLLED // active in the class this year
+  COMPLETED // finished the year in this class
+  TRANSFERRED // moved to another class/school mid-year
+  WITHDRAWN // left mid-year
+}
+
+model Student {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  campusId String  @db.Uuid // home campus
+  // Optional login account — set when a student is given portal access.
+  userId   String? @db.Uuid
+
+  admissionNumber String        @db.VarChar(50) // unique within the school
+  firstName       String        @db.VarChar(100)
+  middleName      String?       @db.VarChar(100)
+  lastName        String        @db.VarChar(100)
+  gender          Gender?
+  dateOfBirth     DateTime?     @db.Date
+  status          StudentStatus @default(ACTIVE)
+
+  email      String?   @db.VarChar(255)
+  phone      String?   @db.VarChar(30)
+  address    String?   @db.Text
+  photoKey   String?   @db.VarChar(500) // storage key in Spaces
+  admittedOn DateTime? @db.Date
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campus      Campus            @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  user        User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  guardians   StudentGuardian[]
+  enrollments Enrollment[]
+
+  @@unique([tenantId, admissionNumber])
+  @@unique([userId])
+  @@index([tenantId])
+  @@index([campusId])
+  @@map("students")
+}
+
+model Guardian {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  userId   String? @db.Uuid // optional login account
+
+  firstName  String  @db.VarChar(100)
+  lastName   String  @db.VarChar(100)
+  email      String? @db.VarChar(255)
+  phone      String  @db.VarChar(30)
+  occupation String? @db.VarChar(120)
+  address    String? @db.Text
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  students StudentGuardian[]
+
+  @@unique([userId])
+  @@index([tenantId])
+  @@map("guardians")
+}
+
+model StudentGuardian {
+  studentId    String  @db.Uuid
+  guardianId   String  @db.Uuid
+  relationship String  @db.VarChar(50) // "Mother", "Father", "Uncle"
+  isPrimary    Boolean @default(false) // the main contact for the student
+
+  createdAt DateTime @default(now())
+
+  student  Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardian Guardian @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+
+  @@id([studentId, guardianId])
+  @@index([studentId])
+  @@index([guardianId])
+  @@map("student_guardians")
+}
+
+// A Student placed in a Class for one AcademicYear — one per (student, year).
+// campusId is derived from the class (grade → section → campus), never taken
+// from the client, mirroring how Class itself fixes its campus.
+model Enrollment {
+  id             String @id @default(uuid()) @db.Uuid
+  tenantId       String @db.Uuid
+  studentId      String @db.Uuid
+  classId        String @db.Uuid
+  academicYearId String @db.Uuid
+  campusId       String @db.Uuid
+
+  rollNumber String?          @db.VarChar(20) // position/number in the class
+  status     EnrollmentStatus @default(ENROLLED)
+  enrolledOn DateTime         @default(now())
+  exitedOn   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  student           Student            @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  class             Class              @relation(fields: [classId], references: [id], onDelete: Cascade)
+  academicYear      AcademicYear       @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  campus            Campus             @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  attendanceRecords AttendanceRecord[]
+  scores            AssessmentScore[]
+
+  @@unique([studentId, academicYearId])
+  @@index([tenantId])
+  @@index([classId])
+  @@index([academicYearId])
+  @@map("enrollments")
+}
+
+// ============================================
+// ATTENDANCE & ASSESSMENT (see docs — Phase 3)
+// ============================================
+// Two record-keeping layers on top of the SIS roster:
+//   • AttendanceRecord — one student's presence in a class on a date, keyed to
+//     the enrollment (which already fixes student + class + year).
+//   • Assessment + AssessmentScore — a scored exam/test for a class + subject in
+//     a term, and each enrolled student's raw score. The band/grade is computed
+//     at read time from the section's grading scheme, not stored, so re-banding a
+//     scheme never leaves stale letters behind.
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+model AttendanceRecord {
+  id           String @id @default(uuid()) @db.Uuid
+  tenantId     String @db.Uuid
+  enrollmentId String @db.Uuid
+  // Denormalized from the enrollment so a class's day can be queried directly.
+  classId      String @db.Uuid
+
+  date   DateTime         @db.Date
+  status AttendanceStatus @default(PRESENT)
+  note   String?          @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  class      Class      @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@unique([enrollmentId, date])
+  @@index([tenantId])
+  @@index([classId, date])
+  @@map("attendance_records")
+}
+
+// A scored assessment for one class + subject, optionally within a term.
+// `maxScore` is the denominator; each AssessmentScore carries the raw score and
+// the band is derived from the section's grading scheme at read time.
+model Assessment {
+  id             String @id @default(uuid()) @db.Uuid
+  tenantId       String @db.Uuid
+  classId        String @db.Uuid
+  subjectId      String @db.Uuid
+  academicYearId String @db.Uuid
+
+  termId   String?   @db.Uuid
+  name     String    @db.VarChar(100) // "Mid-Term", "CAT 1"
+  maxScore Decimal   @default(100) @db.Decimal(6, 2)
+  date     DateTime? @db.Date
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  class        Class             @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subject      Subject           @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear      @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  term         AcademicTerm?     @relation(fields: [termId], references: [id], onDelete: SetNull)
+  scores       AssessmentScore[]
+
+  @@index([tenantId])
+  @@index([classId])
+  @@index([subjectId])
+  @@index([academicYearId])
+  @@map("assessments")
+}
+
+model AssessmentScore {
+  id           String @id @default(uuid()) @db.Uuid
+  tenantId     String @db.Uuid
+  assessmentId String @db.Uuid
+  enrollmentId String @db.Uuid
+
+  score  Decimal @db.Decimal(6, 2) // raw score out of the assessment's maxScore
+  remark String? @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@unique([assessmentId, enrollmentId])
+  @@index([tenantId])
+  @@index([enrollmentId])
+  @@map("assessment_scores")
+}
+
+// ============================================
+// STAFF & TEACHING (see docs — Phase 4)
+// ============================================
+// The staff side of the school, complementing the SIS roster:
+//   • Staff       — an employee (teacher/admin), optionally linked to a login
+//                   User; belongs to at most one primary Department.
+//   • Department  — a grouping of subjects and staff, with a Head (HOD).
+//   • DepartmentSubject — which subjects a department (and its HOD) covers.
+//   • TeachingAssignment — who teaches which subject in which class, per year.
+// Class.classTeacherId names the CLASS_TEACHER for a stream. Staff↔Department
+// has two relations: membership (Staff.departmentId) and headship
+// (Department.headId), so both are nullable + SetNull to avoid a cycle deadlock.
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  VOLUNTEER
+}
+
+enum StaffStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+model Staff {
+  id           String  @id @default(uuid()) @db.Uuid
+  tenantId     String  @db.Uuid
+  campusId     String  @db.Uuid // home campus
+  userId       String? @db.Uuid // optional login account
+  departmentId String? @db.Uuid // primary department (member of)
+
+  staffNumber      String         @db.VarChar(50) // unique within the school
+  title            String?        @db.VarChar(20) // "Mr", "Ms", "Dr"
+  firstName        String         @db.VarChar(100)
+  middleName       String?        @db.VarChar(100)
+  lastName         String         @db.VarChar(100)
+  email            String?        @db.VarChar(255)
+  phone            String?        @db.VarChar(30)
+  employmentType   EmploymentType @default(FULL_TIME)
+  status           StaffStatus    @default(ACTIVE)
+  joinedOn         DateTime?      @db.Date
+  // Timetable: caps this teacher's daily load; null = use the tenant default.
+  maxPeriodsPerDay Int?           @db.SmallInt
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campus                Campus                 @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  user                  User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  department            Department?            @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
+  headOfDepartments     Department[]           @relation("DepartmentHead")
+  classesAsClassTeacher Class[]                @relation("ClassTeacher")
+  teachingAssignments   TeachingAssignment[]
+  invitations           Invitation[]
+  unavailability        StaffUnavailability[]
+  timetableEntries      TimetableEntry[]
+  swapRequests          TimetableSwapRequest[]
+
+  @@unique([tenantId, staffNumber])
+  @@unique([userId])
+  @@index([tenantId])
+  @@index([campusId])
+  @@index([departmentId])
+  @@map("staff")
+}
+
+model Department {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  name     String  @db.VarChar(100)
+  code     String? @db.VarChar(30)
+  headId   String? @db.Uuid // the HOD
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant   Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  head     Staff?              @relation("DepartmentHead", fields: [headId], references: [id], onDelete: SetNull)
+  members  Staff[]             @relation("DepartmentMembers")
+  subjects DepartmentSubject[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("departments")
+}
+
+model DepartmentSubject {
+  departmentId String @db.Uuid
+  subjectId    String @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  subject    Subject    @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@id([departmentId, subjectId])
+  @@index([departmentId])
+  @@index([subjectId])
+  @@map("department_subjects")
+}
+
+// A teacher teaching one subject in one class for one academic year.
+// This row doubles as the timetable *demand* (Phase 5): how many periods a week
+// the subject needs in this class, and how it should be placed.
+model TeachingAssignment {
+  id             String @id @default(uuid()) @db.Uuid
+  tenantId       String @db.Uuid
+  staffId        String @db.Uuid
+  classId        String @db.Uuid
+  subjectId      String @db.Uuid
+  academicYearId String @db.Uuid
+
+  // ── Timetable requirement ──────────────────────────────────────────────
+  // 0 = not timetabled (the teacher is assigned but the subject isn't placed).
+  periodsPerWeek   Int       @default(0)
+  // How many of those periods must be back-to-back pairs (labs, practicals).
+  // Each double consumes 2 of periodsPerWeek.
+  doublePeriods    Int       @default(0)
+  // Restrict placement to rooms of this type (e.g. a LAB for practicals).
+  requiredRoomType RoomType?
+  // Soft preference: schedule earlier in the day (core/attention-heavy subjects).
+  preferMorning    Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  staff        Staff        @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  class        Class        @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subject      Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, classId, subjectId, academicYearId])
+  @@index([tenantId])
+  @@index([classId])
+  @@index([staffId])
+  @@index([academicYearId])
+  @@map("teaching_assignments")
+}
+
+// ============================================
+// TIMETABLE — SETUP (see docs — Phase 5a)
+// ============================================
+// The scheduling problem's *inputs*. The demand (how many periods each subject
+// needs) lives on TeachingAssignment above; this section defines when lessons
+// can happen, where, and when staff are unavailable.
+//
+// v1 uses ONE tenant-wide period grid. Sections with shorter days are handled by
+// leaving later periods unused rather than by separate bell schedules — the
+// standard simplification, and it keeps the solver's slot space uniform.
+
+enum RoomType {
+  CLASSROOM
+  LAB
+  HALL
+  LIBRARY
+  SPORTS
+  OTHER
+}
+
+// One row per tenant — the shape of the school week.
+model TimetableSettings {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @unique @db.Uuid
+
+  // ISO weekday numbers that are taught: 1 = Monday … 7 = Sunday.
+  teachingDays Int[] @default([1, 2, 3, 4, 5])
+
+  // ── Daily layout — every school defines its own shape ──────────────────
+  // Remembered inputs to the schedule builder. The Period rows stay the source
+  // of truth: a school can generate a regular grid from these and then hand-edit
+  // any period (different lengths, extra breaks, an irregular day).
+  dayStartTime          String? @db.VarChar(5) // "08:00"
+  lessonDurationMinutes Int?    @db.SmallInt // default length of one lesson
+  lessonsPerDay         Int?    @db.SmallInt // teaching periods per day
+
+  // ── Load ceilings ──────────────────────────────────────────────────────
+  // Cap on a teacher's daily load; Staff.maxPeriodsPerDay overrides per person.
+  maxPeriodsPerTeacherPerDay Int? @db.SmallInt
+  // Cap on how many lessons one class may have in a day.
+  maxLessonsPerClassPerDay   Int? @db.SmallInt
+  // Periods at or before this order count as "morning" for preferMorning.
+  morningEndsAfterPeriod     Int? @db.SmallInt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("timetable_settings")
+}
+
+// A slot in the daily bell schedule. Breaks are kept so the grid renders
+// realistically, but they are never scheduled into.
+model Period {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+
+  name      String  @db.VarChar(50) // "Period 1", "Break", "Lunch"
+  order     Int // position within the day
+  startTime String  @db.VarChar(5) // "08:00" (local wall clock)
+  endTime   String  @db.VarChar(5) // "08:40"
+  isBreak   Boolean @default(false) // not teachable
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant               Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  unavailability       StaffUnavailability[]
+  timetableEntries     TimetableEntry[]
+  TimetableSwapRequest TimetableSwapRequest[]
+
+  @@unique([tenantId, order])
+  @@index([tenantId])
+  @@map("periods")
+}
+
+model Room {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  campusId String @db.Uuid
+
+  name     String   @db.VarChar(100)
+  code     String   @db.VarChar(30)
+  type     RoomType @default(CLASSROOM)
+  capacity Int?     @db.SmallInt
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campus           Campus           @relation(fields: [campusId], references: [id], onDelete: Cascade)
+  timetableEntries TimetableEntry[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([campusId])
+  @@map("rooms")
+}
+
+enum TimetableStatus {
+  DRAFT // being built or edited — not in force
+  PUBLISHED // in force for its date range
+  ARCHIVED // superseded or retired
+}
+
+// A dated version of the school's timetable.
+//
+// Timetables change during a year (a new term, a mid-term revision), so a
+// version is not "the" timetable — it is the one in force **from a date**. A
+// school can prepare next term's timetable now, publish it with a future
+// effectiveFrom, and it takes over automatically on the day.
+//
+// effectiveTo = null means "until superseded". Publishing a new version
+// auto-closes the previous open-ended one the day before, so the PUBLISHED
+// versions of a tenant never overlap (enforced in the service).
+model Timetable {
+  id             String  @id @default(uuid()) @db.Uuid
+  tenantId       String  @db.Uuid
+  academicYearId String  @db.Uuid
+  // Optional: a timetable often maps to one term, but need not.
+  termId         String? @db.Uuid
+
+  name   String          @db.VarChar(100) // "Term 1 2026", "Revised (from May)"
+  status TimetableStatus @default(DRAFT)
+
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date // null = until superseded
+
+  publishedAt DateTime?
+  publishedBy String?   @db.Uuid
+  // Solver quality metrics (soft-constraint score, violations, run time).
+  metrics     Json?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  tenant       Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear           @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  term         AcademicTerm?          @relation(fields: [termId], references: [id], onDelete: SetNull)
+  entries      TimetableEntry[]
+  runs         TimetableRun[]
+  swapRequests TimetableSwapRequest[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, effectiveFrom])
+  @@map("timetables")
+}
+
+// One placed lesson: a class studying a subject with a teacher, in a room, at a
+// (day, period) of a given timetable version.
+//
+// The three unique indexes are the clash guard. The solver already refuses to
+// create conflicts, but these make it *impossible* to persist one — a class,
+// a teacher, and a room can each hold only one lesson per slot. (The room index
+// is partial, added in the migration, since roomId is nullable.)
+model TimetableEntry {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @db.Uuid
+  timetableId String @db.Uuid
+
+  classId   String  @db.Uuid
+  subjectId String  @db.Uuid
+  staffId   String  @db.Uuid
+  roomId    String? @db.Uuid
+
+  day      Int    @db.SmallInt // ISO weekday, 1 = Monday
+  periodId String @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant               Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  timetable            Timetable              @relation(fields: [timetableId], references: [id], onDelete: Cascade)
+  class                Class                  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subject              Subject                @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  staff                Staff                  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  room                 Room?                  @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  period               Period                 @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  swapRequestsAsSource TimetableSwapRequest[] @relation("SwapEntry")
+  swapRequestsAsTarget TimetableSwapRequest[] @relation("SwapTargetEntry")
+
+  @@unique([timetableId, classId, day, periodId])
+  @@unique([timetableId, staffId, day, periodId])
+  @@index([timetableId])
+  @@index([timetableId, staffId])
+  @@index([tenantId])
+  @@map("timetable_entries")
+}
+
+enum TimetableRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum SwapRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+// A teacher asking for one of their lessons to be moved or swapped.
+//
+// Either `targetEntryId` (trade slots with another lesson) or `targetDay` +
+// `targetPeriodId` (move into a free slot) is set. Nothing changes until an
+// approver acts, and approval re-validates every hard constraint — a request
+// that has since become impossible is rejected with the reason rather than
+// silently corrupting the timetable.
+model TimetableSwapRequest {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @db.Uuid
+  timetableId String @db.Uuid
+
+  // The lesson the requester wants moved (always one of their own).
+  entryId        String  @db.Uuid
+  requestedById  String  @db.Uuid // Staff
+  // Swap with this lesson …
+  targetEntryId  String? @db.Uuid
+  // … or move into this free slot.
+  targetDay      Int?    @db.SmallInt
+  targetPeriodId String? @db.Uuid
+
+  reason       String?           @db.VarChar(500)
+  status       SwapRequestStatus @default(PENDING)
+  reviewedById String?           @db.Uuid // User who decided
+  decisionNote String?           @db.VarChar(500)
+  decidedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant       Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  timetable    Timetable       @relation(fields: [timetableId], references: [id], onDelete: Cascade)
+  entry        TimetableEntry  @relation("SwapEntry", fields: [entryId], references: [id], onDelete: Cascade)
+  targetEntry  TimetableEntry? @relation("SwapTargetEntry", fields: [targetEntryId], references: [id], onDelete: Cascade)
+  requestedBy  Staff           @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+  targetPeriod Period?         @relation(fields: [targetPeriodId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([timetableId, status])
+  @@index([requestedById])
+  @@map("timetable_swap_requests")
+}
+
+// An asynchronous generation job. Solving takes seconds, so the request returns
+// immediately with a run the client polls.
+model TimetableRun {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @db.Uuid
+  timetableId String @db.Uuid
+
+  status   TimetableRunStatus @default(QUEUED)
+  progress Int                @default(0) @db.SmallInt // 0–100
+  message  String?            @db.VarChar(500)
+  // Placed/unplaced counts, soft-constraint score, timings.
+  metrics  Json?
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  timetable Timetable @relation(fields: [timetableId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([timetableId])
+  @@map("timetable_runs")
+}
+
+// A (day, period) a staff member cannot teach — a hard solver constraint.
+model StaffUnavailability {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  staffId  String @db.Uuid
+  periodId String @db.Uuid
+
+  day    Int     @db.SmallInt // ISO weekday, 1 = Monday
+  reason String? @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  staff  Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  period Period @relation(fields: [periodId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, day, periodId])
+  @@index([tenantId])
+  @@index([staffId])
+  @@map("staff_unavailability")
+}
+
+// ============================================
 // PROJECTS TABLE (Example tenant resource)
 // ============================================
 model Project {
-  id          String  @id @default(uuid()) @db.Uuid
-  tenantId    String  @db.Uuid
-  ownerId     String  @db.Uuid
-  
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  ownerId  String @db.Uuid
+
   name        String  @db.VarChar(255)
   description String? @db.Text
   status      String  @default("active") @db.VarChar(50)
-  
+
   // Project metadata
-  metadata    Json    @default("{}")
-  
+  metadata Json @default("{}")
+
   // Timestamps
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
-  
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
   // Relations
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   owner  User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  
+
   @@index([tenantId])
   @@index([ownerId])
   @@index([tenantId, status])
@@ -366,21 +1437,21 @@ model Project {
 // AUDIT LOGS TABLE
 // ============================================
 model AuditLog {
-  id           BigInt   @id @default(autoincrement())
+  id       BigInt  @id @default(autoincrement())
   // null = platform-level event (e.g. SUPER_ADMIN created)
-  tenantId     String?  @db.Uuid
-  userId       String?  @db.Uuid
-  
-  action       String   @db.VarChar(100)
-  resourceType String?  @db.VarChar(100)
-  resourceId   String?  @db.Uuid
-  
-  metadata     Json?
-  ipAddress    String?  @db.Inet
-  userAgent    String?  @db.Text
-  
-  createdAt    DateTime @default(now())
-  
+  tenantId String? @db.Uuid
+  userId   String? @db.Uuid
+
+  action       String  @db.VarChar(100)
+  resourceType String? @db.VarChar(100)
+  resourceId   String? @db.Uuid
+
+  metadata  Json?
+  ipAddress String? @db.Inet
+  userAgent String? @db.Text
+
+  createdAt DateTime @default(now())
+
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([userId])
   @@map("audit_logs")

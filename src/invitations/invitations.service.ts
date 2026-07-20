@@ -9,6 +9,7 @@ import {
 import { InvitationStatus } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { AuditService } from '../audit/audit.service';
+import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { UNINVITABLE_ROLE_KEYS } from '../rbac/rbac.constants';
 import { RbacService } from '../rbac/rbac.service';
@@ -37,14 +38,22 @@ export class InvitationsService {
     private readonly prisma: PrismaService,
     private readonly rbacService: RbacService,
     private readonly auditService: AuditService,
+    private readonly mailService: MailService,
   ) {}
 
   /**
    * Invite an email into the school with pre-assigned roles.
-   * Returns the raw token ONCE — only its hash is stored.
-   * (Email delivery is a TODO; for now the caller shares the token.)
+   * The raw token only ever leaves here inside the invitation email — the
+   * database stores just its SHA-256 hash.
    */
-  async create(tenantId: string, invitedBy: string, dto: CreateInvitationDto) {
+  async create(
+    tenantId: string,
+    invitedBy: string,
+    dto: CreateInvitationDto,
+    // Set when the invite is issued *for* a staff profile — accepting it links
+    // the new account back to that Staff row. Caller validates tenant ownership.
+    staffId?: string,
+  ) {
     const forbidden = dto.roleKeys.filter((key) =>
       UNINVITABLE_ROLE_KEYS.includes(key),
     );
@@ -93,14 +102,29 @@ export class InvitationsService {
         tokenHash: sha256(token),
         invitedBy,
         expiresAt: new Date(Date.now() + INVITE_TTL_MS),
+        staffId: staffId ?? null,
       },
       select: inviteSelect,
     });
 
     this.logger.log(`Invitation created for ${dto.email}`);
 
-    // TODO: send via email service instead of returning in the response.
-    return { ...invitation, token };
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
+    // Fire-and-forget: a mail outage must not fail the invitation itself.
+    void this.mailService.sendInvitationEmail(
+      dto.email,
+      token,
+      tenant?.name ?? 'your school',
+      dto.roleKeys,
+      INVITE_TTL_MS / (24 * 60 * 60 * 1000),
+    );
+
+    // The raw token is deliberately NOT returned — it only reaches the invitee
+    // through the email, the same as verification and password-reset tokens.
+    return invitation;
   }
 
   findAll(tenantId: string) {
@@ -173,6 +197,19 @@ export class InvitationsService {
         data: roles.map((role) => ({ userId, roleId: role.id })),
         skipDuplicates: true,
       });
+      // If this invite was issued for a staff profile, bind the new account to
+      // it — but never steal a link that's already set (Staff.userId is unique).
+      if (invitation.staffId) {
+        await tx.staff.updateMany({
+          where: {
+            id: invitation.staffId,
+            tenantId: invitation.tenantId,
+            userId: null,
+            deletedAt: null,
+          },
+          data: { userId },
+        });
+      }
       await tx.invitation.update({
         where: { id: invitation.id },
         data: { status: InvitationStatus.ACCEPTED, acceptedAt: new Date() },

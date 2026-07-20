@@ -24,8 +24,10 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResendTwoFactorDto } from './dto/resend-two-factor.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { VerifyTwoFactorDto } from './dto/verify-two-factor.dto';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -67,6 +69,35 @@ export class AuthController {
   })
   adminLogin(@Body() dto: LoginDto, @Req() request: FastifyRequest) {
     return this.authService.adminLogin(dto, request.ip);
+  }
+
+  @Public()
+  // Brute-forceable: each call checks a 6-digit code against a challenge.
+  // The per-code attempt cap in the service is the hard stop; this throttles
+  // the endpoint itself.
+  @RateLimit(perMinute(5))
+  @Post('2fa/verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Complete login with the emailed 2FA code' })
+  verifyTwoFactor(
+    @Body() dto: VerifyTwoFactorDto,
+    @Req() request: FastifyRequest,
+  ) {
+    return this.authService.verifyTwoFactor(
+      dto.challengeToken,
+      dto.code,
+      request.ip,
+    );
+  }
+
+  @Public()
+  // Tight bucket: each call sends an email.
+  @RateLimit(perMinute(2))
+  @Post('2fa/resend')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Re-send the 2FA code for a pending login' })
+  resendTwoFactor(@Body() dto: ResendTwoFactorDto) {
+    return this.authService.resendTwoFactor(dto.challengeToken);
   }
 
   @Public()

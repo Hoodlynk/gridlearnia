@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IdDocumentType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
@@ -6,11 +6,14 @@ import {
   ArrayMinSize,
   IsArray,
   IsEnum,
+  IsIn,
+  IsOptional,
   IsString,
   Length,
   Matches,
   ValidateNested,
 } from 'class-validator';
+import { SECTION_OPTIONS } from '../../tenants/academic-provisioning';
 import { SchoolRequestDocumentDto } from './school-request-document.dto';
 
 export class CreateSchoolRequestDto {
@@ -59,6 +62,19 @@ export class CreateSchoolRequestDto {
     message: 'phone must include a country code, e.g. +254712345678',
   })
   phone: string;
+
+  @ApiPropertyOptional({
+    enum: SECTION_OPTIONS,
+    isArray: true,
+    description:
+      'Education bands the school offers — become Sections on approval',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(SECTION_OPTIONS.length)
+  @IsString({ each: true })
+  @IsIn([...SECTION_OPTIONS], { each: true })
+  sections?: string[];
 
   @ApiProperty({
     type: [SchoolRequestDocumentDto],

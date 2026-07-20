@@ -2,18 +2,39 @@
 
 Production-ready multi-tenancy Backend REST API built with NestJS (Fastify), TypeScript, and Supabase PostgreSQL.
 
+> Architecture overview: [ARCHITECTURE.md](ARCHITECTURE.md) · deep dives:
+> [docs/RBAC.md](docs/RBAC.md), [docs/ONBOARDING.md](docs/ONBOARDING.md),
+> [docs/ACADEMICS.md](docs/ACADEMICS.md).
+
 ## Features
 
-- ✅ Multi-tenant architecture with single database (tenant_id isolation)
-- ✅ JWT-based authentication (access + refresh tokens)
-- ✅ Role-based access control via `@Roles()` guard
-- ✅ Global auth guard — routes are protected by default, opt out with `@Public()`
+- ✅ Multi-tenant architecture, single database (`tenantId` isolation)
+- ✅ Organization model: Tenant → Campus → Section → Grade → Class; per-tenant
+  localization; `TenantModule` feature flags (with non-disableable core modules)
+- ✅ **Two-factor login** — email 6-digit code after password, for both the
+  school app and the admin console
+- ✅ JWT auth (15m access + 7d refresh, separate secrets; derived secret for 2FA
+  challenge tokens); email verification & password reset
+- ✅ Permission-based RBAC (`module:action`, multi-role) via `PermissionsGuard`
+  + `@RequirePermissions()`; global auth guard (opt out with `@Public()`)
+- ✅ Academic engine — curricula/subjects & grading/bands as system templates
+  with per-tenant clone-and-customize; academic years/terms; sections/grades/classes
+- ✅ Student Information System — students, guardians (many-to-many with primary
+  contact), and enrollment of students into classes per academic year
+- ✅ Attendance & assessment — daily class registers, scored exams/tests, and
+  report cards banded by each section's grading scheme (bands computed, not stored)
+- ✅ Staff & teaching — staff profiles, departments (with HOD + subjects), class
+  teachers, and teaching assignments (teacher × class × subject per year)
+- ✅ Timetable — school-defined day, rooms, per-subject loads, teacher
+  availability, readiness check, dated versions, a **one-click solver** (pure
+  deterministic engine; clashes impossible by DB constraint), plus drag-and-drop
+  editing and teacher swap requests
+- ✅ Onboarding with KYC (documents to DigitalOcean Spaces) + structure-picker;
+  approval provisions campus, modules, academic year, and sections in one transaction
+- ✅ Transactional email via Mailgun; audit log + alert webhook
 - ✅ Prisma ORM with Supabase PostgreSQL (pgBouncer-aware connection setup)
-- ✅ Request validation with class-validator DTOs
-- ✅ Consistent response envelope + error format (global interceptor/filter)
-- ✅ Rate limiting (@nestjs/throttler, tight limits on login)
-- ✅ Swagger docs at `/docs`
-- ✅ Heroku deployment ready
+- ✅ Consistent response envelope + error format; per-IP/per-route rate limiting
+- ✅ Swagger docs at `/docs`; Heroku deployment ready
 
 ## Tech Stack
 
@@ -81,18 +102,27 @@ The API will be available at `http://localhost:8080`, Swagger docs at `http://lo
 
 ```
 src/
-├── auth/            # Register, login, refresh, me
-├── users/           # Tenant-scoped user management
-├── tenants/         # Current-tenant overview and settings
+├── auth/            # Register, login (+2FA), verify-email, password reset, refresh, me
+├── academics/       # Years/terms, sections, grades, classes, catalog, curricula, grading
+├── sis/             # Students, guardians, enrollment (Student Information System)
+├── attendance/      # Daily class registers + summaries
+├── assessment/      # Exams/tests, score sheets, report cards
+├── staff/           # Staff, departments (+ HOD/subjects), teaching assignments
+├── timetable/       # School day, rooms, lesson loads, readiness, versions
+│   └── engine/      # Pure deterministic scheduling solver (no I/O)
+├── school-requests/ # School applications (KYC), review, approval/rejection
+├── invitations/     # Invite/accept/revoke (role-carrying tokens)
+├── tenants/         # Tenant overview/settings; campuses + module flags (tenant + platform)
+├── users/           # Tenant-scoped user management + role assignment
+├── rbac/            # Permission catalog, roles, PermissionsGuard, RbacService
+├── mail/            # Mailgun MailService + branded templates
+├── storage/         # DigitalOcean Spaces (KYC uploads, presigned downloads)
+├── audit/           # AuditService (audit_logs + alert webhook)
+├── rate-limit/      # Token-bucket guard + @RateLimit()
 ├── health/          # Liveness + DB check
 ├── prisma/          # Global PrismaService
+├── common/          # decorators, guards, filters, interceptors, types, utils
 ├── config/          # Environment configuration
-├── common/
-│   ├── decorators/  # @Public, @Roles, @CurrentUser, @CurrentTenant
-│   ├── guards/      # JwtAuthGuard, RolesGuard (registered globally)
-│   ├── filters/     # Standard error envelope
-│   ├── interceptors/# Standard success envelope
-│   └── types/       # JwtPayload, AuthenticatedRequest
 ├── app.module.ts    # Root module (global guards/filter/interceptor)
 └── main.ts          # Fastify bootstrap, helmet, CORS, Swagger
 ```
@@ -101,31 +131,63 @@ src/
 
 All routes are prefixed with `/api/v1`.
 
-### Authentication
+### Authentication (see ARCHITECTURE.md §4)
 - `POST /api/v1/auth/register` - Platform registration: email + password, no school (public)
-- `POST /api/v1/auth/login` - Login with email + password (public, throttled)
+- `POST /api/v1/auth/login` - Step 1: verify credentials, email a 2FA code, return a challenge (public, throttled)
+- `POST /api/v1/auth/admin/login` - Same, admin console (SUPER_ADMIN only)
+- `POST /api/v1/auth/2fa/verify` - Step 2: exchange challenge + code for tokens (public, throttled)
+- `POST /api/v1/auth/2fa/resend` - Re-send the 2FA code (public, throttled)
 - `POST /api/v1/auth/refresh` - Refresh access token (public, throttled)
+- `POST /api/v1/auth/verify-email` · `POST /api/v1/auth/resend-verification`
+- `POST /api/v1/auth/forgot-password` · `POST /api/v1/auth/reset-password`
 - `GET /api/v1/auth/me` - Current user, tenant (nullable), roles, permissions
 
 ### Onboarding (see docs/ONBOARDING.md)
-- `POST /api/v1/school-requests` - Apply to create a school (tenantless users)
+- `POST /api/v1/school-requests` - Apply to create a school (KYC + sections; tenantless users)
+- `PUT /api/v1/school-requests/draft` · `POST /api/v1/school-requests/draft/submit`
 - `GET /api/v1/school-requests/mine` - My requests
-- `GET/POST /api/v1/platform/school-requests[...]` - SUPER_ADMIN review/approve/reject
-- `POST /api/v1/invitations` - Invite an email with roles (user-management:manage)
-- `GET /api/v1/invitations` / `DELETE /api/v1/invitations/:id` - List / revoke
-- `POST /api/v1/invitations/accept` - Redeem an invite token, join the school
+- `GET/POST /api/v1/platform/school-requests[...]` - SUPER_ADMIN review/approve/reject/request-changes
+- `POST /api/v1/invitations` / `GET` / `DELETE /:id` / `POST /accept` - invite / list / revoke / redeem
 
-### Users (tenant-scoped)
-- `GET /api/v1/users` - List users (OWNER/ADMIN/MANAGER)
-- `GET /api/v1/users/:id` - Get user by ID (OWNER/ADMIN/MANAGER)
-- `PATCH /api/v1/users/:id` - Update user (OWNER/ADMIN)
-- `DELETE /api/v1/users/:id` - Soft-delete user (OWNER/ADMIN)
+### Academics (tenant-scoped; see docs/ACADEMICS.md)
+- `.../academics/years`, `.../sections`, `.../grades`, `.../classes` - CRUD
+- `.../academics/catalog/{curricula,grading-schemes}` - available templates (read)
+- `.../academics/curricula` + `.../grading-schemes` - clone/create/customize own templates
+- `GET /api/v1/campuses` - the school's own campuses
 
-### Tenants
-- `GET /api/v1/tenants/me` - Current tenant with usage overview
-- `PATCH /api/v1/tenants/me` - Update tenant name/settings (OWNER)
+### Student Information System (tenant-scoped; see docs/SIS.md)
+- `.../sis/students` - CRUD + `/:id/guardians[/new|/:guardianId]` guardian links
+- `.../sis/guardians` - guardian directory CRUD
+- `.../sis/enrollments` - enroll/transfer/withdraw students by class & year
 
-### Health
+### Attendance & assessment (tenant-scoped; see docs/ATTENDANCE-ASSESSMENT.md)
+- `.../attendance` - class register (GET by class+date, PUT to mark) + `/summary`
+- `.../assessment/assessments` - CRUD + `/:id/scores` (GET/PUT the score sheet)
+- `.../assessment/report-card/:enrollmentId` - a student's banded report card
+
+### Staff & teaching (tenant-scoped; see docs/STAFF-TEACHING.md)
+- `.../staff/members` - staff CRUD (+ `/:id/invite` and `/:id/user` for portal access)
+- `.../staff/departments` - department CRUD + `/:id/subjects` links (HOD via PATCH)
+- `.../staff/teaching-assignments` - teacher×class×subject + `/class-teacher` (PUT)
+
+### Timetable (tenant-scoped; see docs/TIMETABLE.md)
+- `.../timetable/settings` · `.../timetable/periods` (+ `/generate` from your layout)
+- `.../timetable/rooms` · `.../timetable/requirements` · `.../timetable/unavailability/:staffId`
+- `.../timetable/readiness?academicYearId=` - pre-flight feasibility check
+- `.../timetable/timetables` - dated versions (+ `/:id/publish`, `/:id/archive`)
+- `.../timetable/timetables/active?date=` - the version in force on a date
+- `.../timetable/timetables/:id/generate` - solve a draft (returns a run to poll)
+- `.../timetable/timetables/:id/entries` - placed lessons by class/teacher/room
+- `.../timetable/entries/:id/{legal-moves,move,swap}` - manual editing (5c)
+- `.../timetable/swap-requests` (+ `/:id/{approve,reject,cancel}`) - swap requests (5d)
+
+### Tenants & platform admin (SUPER_ADMIN)
+- `GET/PATCH /api/v1/tenants/me` - Current tenant overview / settings
+- `GET /api/v1/platform/tenants` + `PATCH/DELETE /:id` - schools management
+- `.../platform/tenants/:id/campuses` + `.../modules/:moduleKey` - campuses / feature flags
+
+### Users (tenant-scoped) & Health
+- `GET/PATCH/DELETE /api/v1/users[/:id]` + `POST/DELETE /:id/roles[/:roleKey]`
 - `GET /api/v1/health` - Health check (public)
 
 ## Response Format
@@ -171,7 +233,7 @@ The `Procfile` runs `prisma migrate deploy` on release and starts `dist/main.js`
 ### Scaling notes
 
 - `DATABASE_URL` must point at the Supabase **pooler** (port 6543) with a per-instance `connection_limit`, or multiple dynos will exhaust Supabase's direct connection cap.
-- Rate limiting is in-memory per process. Before scaling past one dyno, plug a Redis storage adapter into `ThrottlerModule` (see note in `app.module.ts`).
+- Rate limiting and the RBAC permission cache are in-memory per process. Before scaling past one dyno, swap the `TokenBucketStore` / RBAC cache for Redis (both are behind abstractions — see ARCHITECTURE.md §10).
 
 ## Scripts
 

@@ -19,6 +19,11 @@ import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TENANT_ROOT_ROLE } from '../rbac/rbac.constants';
 import { RbacService } from '../rbac/rbac.service';
+import {
+  buildDefaultAcademicYear,
+  orderedSections,
+} from '../tenants/academic-provisioning';
+import { DEFAULT_MODULE_STATE } from '../tenants/tenant-modules.constants';
 import { StorageService } from '../storage/storage.service';
 import { CreateSchoolRequestDto } from './dto/create-school-request.dto';
 import { SaveDraftDto } from './dto/save-draft.dto';
@@ -33,6 +38,7 @@ const requestSelect = {
   idType: true,
   idNumber: true,
   phone: true,
+  sections: true,
   reason: true,
   reviewedAt: true,
   createdAt: true,
@@ -132,6 +138,7 @@ export class SchoolRequestsService {
       idType: dto.idType,
       idNumber: dto.idNumber,
       phone: dto.phone,
+      sections: dto.sections ?? [],
     };
     const documentRows = documents.map((doc) => ({
       type: doc.type,
@@ -271,6 +278,7 @@ export class SchoolRequestsService {
         idType: dto.idType,
         idNumber: dto.idNumber,
         phone: dto.phone,
+        sections: dto.sections ?? [],
         documents: {
           create: dto.documents.map((doc) => ({
             type: doc.type,
@@ -512,6 +520,54 @@ export class SchoolRequestsService {
           nameKey: schoolNameKey(request.name),
           subdomain: request.subdomain,
         },
+      });
+      // Every school starts with one physical site. Single-campus schools
+      // never touch this; multi-site schools add more later. Operational
+      // records will hang off a campus, so it must exist from day one.
+      const mainCampus = await tx.campus.create({
+        data: {
+          tenantId: newTenant.id,
+          name: 'Main Campus',
+          code: 'MAIN',
+          isMain: true,
+        },
+      });
+
+      // Turn the applicant's structure choice into Section rows under the main
+      // campus (curriculum/grading assigned later). Empty = they skipped it.
+      const sections = orderedSections(request.sections);
+      if (sections.length > 0) {
+        await tx.section.createMany({
+          data: sections.map((section) => ({
+            tenantId: newTenant.id,
+            campusId: mainCampus.id,
+            name: section.name,
+            order: section.order,
+          })),
+        });
+      }
+
+      // Give the school a ready-to-edit calendar: the current year + its
+      // default terms, marked current.
+      const year = buildDefaultAcademicYear();
+      await tx.academicYear.create({
+        data: {
+          tenantId: newTenant.id,
+          name: year.name,
+          startDate: year.startDate,
+          endDate: year.endDate,
+          isCurrent: year.isCurrent,
+          terms: { create: year.terms },
+        },
+      });
+      // Seed the full module catalogue with its default on/off state so the
+      // console can list every module with a toggle from the start.
+      await tx.tenantModule.createMany({
+        data: DEFAULT_MODULE_STATE.map((m) => ({
+          tenantId: newTenant.id,
+          moduleKey: m.moduleKey,
+          enabled: m.enabled,
+        })),
       });
       await tx.user.update({
         where: { id: request.userId },
